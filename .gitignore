@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+node_modules/
+tests/out/
+*.tmp
+# 회사 양식·원고 같은 실제 문서는 저장소에 넣지 않는다
+*.hwp
+*.hwpx
+*.docx
+!tests/fixtures/**

@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>보고서 양식 맞춤</title>
+<meta name="description" content="회사 보고서 양식을 올리고 바꿀 문서를 올리면, 그 양식에 맞춘 한글(.hwpx) 파일을 만들어 줍니다. 파일은 브라우저 밖으로 나가지 않습니다.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%232b5fd9%22/%3E%3Ctext x=%2216%22 y=%2222%22 font-size=%2216%22 text-anchor=%22middle%22 fill=%22white%22 font-family=%22sans-serif%22%3E%EC%96%91%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="mark" aria-hidden="true">양</span><span>보고서 양식 맞춤</span></div>
+  <div id="engine" class="engine" role="status"><span class="dot"></span><span id="engineText">변환 엔진 준비 중…</span></div>
+</header>
+
+<main>
+  <p class="lead">회사에서 쓰던 보고서를 <b>양식</b>으로 올리고, 바꿀 <b>문서</b>를 올리면 그 양식에 맞춘 한글 파일(.hwpx)을 만들어 드립니다.</p>
+  <p class="privacy">🔒 모든 처리는 이 컴퓨터의 브라우저 안에서 이루어집니다. 올린 파일은 어디로도 전송되지 않습니다.</p>
+
+  <section class="step" id="step1">
+    <div class="step-head"><span class="num">1</span><h2>어떤 양식으로 바꿔드릴까요?</h2></div>
+    <div class="drop" id="drop-template" data-kind="template" tabindex="0">
+      <p class="drop-main">양식으로 쓸 보고서(.hwpx)를 여기에 끌어다 놓으세요</p>
+      <p class="drop-sub">또는</p>
+      <button type="button" class="btn" data-import="template">파일 가져오기</button>
+      <p class="drop-hint">표지·차례·본문이 들어 있는 완성된 보고서일수록 양식을 정확히 알아냅니다. .hwp는 한글에서 HWPX로 저장해 주세요.</p>
+    </div>
+    <div class="card" id="template-card" hidden></div>
+    <p class="error" id="template-error" hidden></p>
+  </section>
+
+  <section class="step locked" id="step2" aria-disabled="true">
+    <div class="step-head"><span class="num">2</span><h2>어떤 문서를 이 양식에 맞게 바꿔드릴까요?</h2></div>
+    <div class="drop" id="drop-document" data-kind="document" tabindex="0">
+      <p class="drop-main">바꿀 문서(.docx 또는 .hwpx)를 여기에 끌어다 놓으세요</p>
+      <p class="drop-sub">또는</p>
+      <button type="button" class="btn" data-import="document">파일 가져오기</button>
+      <p class="drop-hint">글자는 그대로 두고 서식만 양식에 맞춥니다.</p>
+    </div>
+    <div class="card" id="document-card" hidden></div>
+    <p class="error" id="document-error" hidden></p>
+  </section>
+
+  <section class="step locked" id="step3" aria-disabled="true">
+    <div class="step-head"><span class="num">3</span><h2>완성된 파일</h2></div>
+    <div class="card" id="done-card" hidden></div>
+    <p class="error" id="convert-error" hidden></p>
+  </section>
+</main>
+
+<footer class="foot">한글(HWPX) 문서 서식을 바꾸는 도구 · 결과는 꼭 한글에서 열어 확인해 주세요.</footer>
+
+<!-- 파일 가져오기 -->
+<div class="modal" id="import-modal" hidden role="dialog" aria-modal="true" aria-labelledby="import-title">
+  <div class="sheet small">
+    <h3 id="import-title">파일 가져오기</h3>
+    <div class="import-choices">
+      <button type="button" class="choice" id="from-device">
+        <span class="ico" aria-hidden="true">💻</span><span><b>기기에서 업로드</b><small>이 컴퓨터에 있는 파일을 고릅니다</small></span>
+      </button>
+      <button type="button" class="choice" id="from-drive" disabled title="Google 드라이브 연결은 준비 중입니다">
+        <span class="ico" aria-hidden="true">☁️</span><span><b>Google 드라이브에서 가져오기</b><small>준비 중</small></span>
+      </button>
+    </div>
+    <div class="actions"><button type="button" class="btn ghost" data-close>닫기</button></div>
+  </div>
+</div>
+
+<!-- 설문 -->
+<div class="modal" id="survey-modal" hidden role="dialog" aria-modal="true" aria-labelledby="survey-title">
+  <form class="sheet" id="survey" novalidate>
+    <h3 id="survey-title">어떻게 만들어 드릴까요?</h3>
+    <p class="hint">원하시는 결과를 정확히 만들기 위해 몇 가지만 여쭤볼게요.</p>
+
+    <fieldset>
+      <legend>1-1. 제목을 만들어 드릴까요? <small>(제목 페이지)</small></legend>
+      <div class="opts">
+        <label><input type="radio" name="title" value="yes"> 예</label>
+        <label><input type="radio" name="title" value="no"> 아니오</label>
+      </div>
+      <div class="sub" data-when="title=yes" hidden>
+        <p class="q">1-2. 제목을 뭐라고 작성할까요?</p>
+        <label class="row"><input type="radio" name="titleMode" value="manual"> 직접 작성
+          <input type="text" id="title-text" placeholder="제목을 입력하세요" maxlength="80"></label>
+        <label class="row"><input type="radio" name="titleMode" value="auto"> 본문 내용 분석 후 자동 제목 생성
+          <span class="preview" id="title-preview"></span></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>2. 목록을 만들어 드릴까요? <small>(차례 페이지)</small></legend>
+      <div class="opts">
+        <label><input type="radio" name="toc" value="yes"> 예</label>
+        <label><input type="radio" name="toc" value="no"> 아니오</label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>3. 페이지 번호를 어떻게 작성해드릴까요?</legend>
+      <div class="opts col">
+        <label><input type="radio" name="pn" value="제목부터"> 제목부터 1페이지</label>
+        <label><input type="radio" name="pn" value="본문부터"> 본문부터 1페이지</label>
+        <label><input type="radio" name="pn" value="없음"> 페이지 번호 필요없음</label>
+        <label class="row"><input type="radio" name="pn" value="지정"> 별도 지정
+          <input type="number" id="pn-start" min="1" max="9999" placeholder="본문 첫 쪽 번호"></label>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>4-1. 머리말을 만들어 드릴까요?</legend>
+      <div class="opts">
+        <label><input type="radio" name="header" value="yes"> 예</label>
+        <label><input type="radio" name="header" value="no"> 아니오</label>
+      </div>
+      <div class="sub" data-when="header=yes" hidden>
+        <p class="q">4-2. 머리말을 뭐라고 작성할까요?</p>
+        <label class="row"><input type="radio" name="headerMode" value="manual"> 직접 작성
+          <input type="text" id="header-text" placeholder="머리말을 입력하세요" maxlength="80"></label>
+        <label class="row"><input type="radio" name="headerMode" value="auto"> 본문 내용 분석 후 자동 머리말 생성
+          <span class="preview" id="header-preview"></span></label>
+      </div>
+    </fieldset>
+
+    <!-- 한 쪽보다 길 수 있는 표가 있을 때만 보인다(엔진이 표 높이를 미리 어림) -->
+    <fieldset id="q-split" hidden>
+      <legend>5. 큰 표가 쪽을 넘어가면 어떻게 나눌까요? <small id="split-count"></small></legend>
+      <div class="opts col">
+        <label><input type="radio" name="split" value="나눔"> 쪽 경계에서 나눔
+          <span class="opt-desc">쪽 끝까지 채우고, 칸 안의 글이 다음 쪽으로 이어집니다</span></label>
+        <label><input type="radio" name="split" value="셀 단위로 나눔"> 셀 단위로 나눔
+          <span class="opt-desc">한 줄(행)이 잘리지 않게 그 줄을 통째로 다음 쪽으로 넘깁니다</span></label>
+      </div>
+      <p class="opt-note">어느 쪽이든 표가 쪽 아래로 넘치지 않게 나눕니다.</p>
+    </fieldset>
+
+    <p class="need" id="survey-need" aria-live="polite"></p>
+    <div class="actions">
+      <button type="button" class="btn ghost" data-close>취소</button>
+      <button type="submit" class="btn primary" id="convert-btn" disabled>변환하기</button>
+    </div>
+  </form>
+</div>
+
+<!-- 진행 중 -->
+<div class="modal busy" id="busy" hidden aria-live="polite">
+  <div class="sheet small center"><div class="spinner" aria-hidden="true"></div><p id="busy-text">처리 중…</p></div>
+</div>
+
+<input type="file" id="file-input" hidden>
+<script src="engine_bundle.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
