@@ -129,7 +129,11 @@ const state = { template: null, document: null, result: null, kind: "template" }
 const ACCEPT = { template: ".hwpx", document: ".hwpx,.docx" };
 
 document.querySelectorAll("[data-import]").forEach((b) =>
-  b.addEventListener("click", () => { state.kind = b.dataset.import; openModal("import-modal"); }));
+  b.addEventListener("click", () => { state.kind = b.dataset.import; openImport(); }));
+function openImport() {
+  openModal("import-modal");
+  if (driveUsable()) googleReady().catch(() => {}); // 드라이브 버튼을 누르기 전에 미리 불러 둔다(팝업 차단 방지)
+}
 $("from-device").addEventListener("click", () => {
   closeModal("import-modal");
   const inp = $("file-input");
@@ -149,10 +153,134 @@ for (const kind of ["template", "document"]) {
     const f = e.dataTransfer.files[0];
     if (f) takeFile(kind, f);
   });
-  zone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); state.kind = kind; openModal("import-modal"); } });
+  zone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); state.kind = kind; openImport(); } });
 }
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());
+
+/* ---------------------------------------------------------------- Google 드라이브
+   사용자가 Picker에서 고른 파일만 이 브라우저로 내려받는다(drive.file 권한 — 다른 파일은 볼 수 없다).
+   API 키·클라이언트 ID는 웹 페이지에 들어가는 공개 값이며, 이 사이트 주소와 Picker API로만 쓰이게 제한해 두었다. */
+const GOOGLE = {
+  apiKey: "AIzaSyCtdkUi5C7IIWu8TEDq-zJsBmq6ah-z100",
+  clientId: "550438141886-5pcpdb8btlnupa89usmlkmo6ot31kid5.apps.googleusercontent.com",
+  appId: "550438141886",
+  scope: "https://www.googleapis.com/auth/drive.file",
+};
+const GDOC = "application/vnd.google-apps.document";
+const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+let gLoad = null;
+let gToken = null; // { value, until }
+
+function driveUsable() { return location.protocol === "https:" || location.hostname === "localhost"; }
+if (!driveUsable()) {
+  $("from-drive").disabled = true;
+  $("drive-sub").textContent = "인터넷 사이트 주소로 열었을 때만 쓸 수 있습니다";
+}
+
+function loadScript(src) {
+  return new Promise((ok, no) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.onload = ok;
+    s.onerror = () => no(new Error("Google 드라이브 연결 도구를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요."));
+    document.head.appendChild(s);
+  });
+}
+function googleReady() {
+  gLoad ||= Promise.all([
+    loadScript("https://accounts.google.com/gsi/client"),
+    loadScript("https://apis.google.com/js/api.js").then(() => new Promise((ok, no) =>
+      gapi.load("picker", { callback: ok, onerror: () => no(new Error("Google 드라이브 파일 고르기 창을 불러오지 못했습니다.")) }))),
+  ]).catch((err) => { gLoad = null; throw err; });
+  return gLoad;
+}
+
+function driveToken() {
+  if (gToken && Date.now() < gToken.until) return Promise.resolve(gToken.value);
+  return new Promise((ok, no) => {
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: GOOGLE.clientId,
+      scope: GOOGLE.scope,
+      callback: (r) => {
+        if (r.error) { no(new Error(r.error === "access_denied" ? "cancel" : (r.error_description || r.error))); return; }
+        gToken = { value: r.access_token, until: Date.now() + (Number(r.expires_in || 3600) - 60) * 1000 };
+        ok(gToken.value);
+      },
+      error_callback: (e) => no(new Error(e && e.type === "popup_closed" ? "cancel"
+        : e && e.type === "popup_failed_to_open" ? "로그인 창이 열리지 않았습니다. 브라우저의 팝업 차단을 이 사이트에 대해 풀어 주세요."
+        : "Google 로그인에 실패했습니다.")),
+    });
+    client.requestAccessToken({ prompt: "" });
+  });
+}
+
+function drivePick(token, kind) {
+  return new Promise((ok) => {
+    const P = google.picker;
+    const mine = new P.DocsView(P.ViewId.DOCS).setIncludeFolders(true).setMode(P.DocsViewMode.LIST);
+    const shared = new P.DocsView(P.ViewId.DOCS).setEnableDrives(true).setIncludeFolders(true).setMode(P.DocsViewMode.LIST);
+    new P.PickerBuilder()
+      .setAppId(GOOGLE.appId)
+      .setDeveloperKey(GOOGLE.apiKey)
+      .setOAuthToken(token)
+      .setLocale("ko")
+      .setTitle(kind === "template" ? "양식으로 쓸 보고서(.hwpx) 고르기" : "바꿀 문서(.docx·.hwpx) 고르기")
+      .addView(mine)
+      .addView(shared)
+      .enableFeature(P.Feature.SUPPORT_DRIVES)
+      .setCallback((d) => {
+        if (d[P.Response.ACTION] === P.Action.PICKED) ok(d[P.Response.DOCUMENTS][0]);
+        else if (d[P.Response.ACTION] === P.Action.CANCEL) ok(null);
+      })
+      .build()
+      .setVisible(true);
+  });
+}
+
+async function driveDownload(token, doc, kind) {
+  const id = encodeURIComponent(doc[google.picker.Document.ID]);
+  let name = doc[google.picker.Document.NAME] || "드라이브 파일";
+  const mime = doc[google.picker.Document.MIME_TYPE] || "";
+  let url = `https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`;
+  if (mime === GDOC) {
+    // 구글 문서로 저장된 글은 워드(.docx)로 내보내 받는다
+    if (kind === "template") throw new Error("양식은 한글 .hwpx 파일이어야 합니다. 구글 문서는 바꿀 문서로만 쓸 수 있습니다.");
+    url = `https://www.googleapis.com/drive/v3/files/${id}/export?mimeType=${encodeURIComponent(DOCX)}`;
+    if (!/\.docx$/i.test(name)) name += ".docx";
+  } else if (mime.startsWith("application/vnd.google-apps.")) {
+    throw new Error("구글 스프레드시트·프레젠테이션 등은 받을 수 없습니다. .hwpx 또는 .docx 파일을 골라 주세요.");
+  } else {
+    const bad = extOk(kind, name);
+    if (bad) throw new Error(bad);
+  }
+  const r = await fetch(url, { headers: { Authorization: "Bearer " + token } });
+  if (r.status === 401) { gToken = null; throw new Error("Google 로그인이 만료되었습니다. 다시 시도해 주세요."); }
+  if (!r.ok) throw new Error(`드라이브에서 파일을 받지 못했습니다 (오류 ${r.status}).`);
+  return new File([await r.blob()], name);
+}
+
+$("from-drive").addEventListener("click", async () => {
+  const kind = state.kind;
+  const errId = kind + "-error";
+  closeModal("import-modal");
+  showError(errId, "");
+  try {
+    await googleReady();
+    const token = await driveToken();
+    const doc = await drivePick(token, kind);
+    if (!doc) return;
+    showBusy("드라이브에서 파일을 받는 중…");
+    const file = await driveDownload(token, doc, kind);
+    hideBusy();
+    await takeFile(kind, file);
+  } catch (err) {
+    hideBusy();
+    const msg = String(err.message || err);
+    if (msg !== "cancel") showError(errId, msg);
+  }
+});
 
 function extOk(kind, name) {
   const ext = name.toLowerCase().split(".").pop();
