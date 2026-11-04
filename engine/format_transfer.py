@@ -27,7 +27,9 @@
   제목 직접 번호 삭제 (true — 번호 모양 없는 개요 문단에 글자로 친 '제4장'·'1.'·'(1)'을 지우고 양식 자동 번호로.
     글자로 친 장 번호는 '장 번호 지정'처럼 따른다), 개체 없는 캡션 ("빈 틀" — 옆에 그림이 없는 캡션 줄은 양식 빈 그림 틀 +
     아래 캡션, 표 캡션 줄은 양식 캡션 모양·번호 문단. "캡션 문단"이면 둘 다 문단. 다른 값이면 [판단 필요] — 사용자 결정 2026-10-19),
-  원고 글자색 ("살림" — 원고에서 검정이 아닌 색 글자(자리표시 등)는 결과에서도 그 색. "검정"이면 모두 양식 글자색 — 사용자 결정 2026-10-19)
+  원고 글자색 ("살림" — 원고에서 검정이 아닌 색 글자(자리표시 등)는 결과에서도 그 색. "검정"이면 모두 양식 글자색 — 사용자 결정 2026-10-19),
+  줄 나눔 ("글자" — 결과의 모든 문단 모양을 '줄 나눔 기준' 한글 단위 '글자'·영어 단위 '글자'로. 어절·단어 단위면 긴 경로·주소가
+    통째로 다음 줄로 넘어가 양쪽 정렬한 윗줄의 낱말 사이가 크게 벌어진다. "양식"이면 양식·원고 값 그대로 — 사용자 결정 2026-11-04)
   머리말: 원고 머리말이 한 칸에 '사업명 | 장 제목'(탭 또는 '|')이면 양식의 두 칸(사업명 ⇥ 장 제목)으로 나눠 넣는다(승인 변경으로 기록).
     원고 머리말이 없거나 공백뿐이면 '사업명 ⇥ 장 제목' — 머리말 사업명 ("양식" — "비움"이면 사업명 칸을 비움, 2026-10-26).
 
@@ -50,6 +52,8 @@
     → 앞표지·차례도 본문의 개요 번호 모양을 가리키게. 구역 중간에서 새로 시작하려면 그 구역의 개요 번호 모양에
     hh:numbering@start = n(0이면 이어서) — 같은 구역 안에서는 새로 시작할 수 없다(노트 699·292).
   - pyhwpx: 숨김(visible=False)으로는 PDF 저장이 실패한다.
+  - 줄 나눔 기준(2026-11-04): 한글 단위는 이름과 반대(breakNonLatinWord "KEEP_WORD" = 글자, "BREAK_WORD" = 어절),
+    영어 단위는 이름대로(breakLatinWord "BREAK_WORD" = 글자, "KEEP_WORD" = 단어) — 같은 문단을 값만 바꿔 PDF로 비교.
 """
 import copy
 import csv
@@ -864,9 +868,24 @@ def cmd_analyze(R: Run):
 
 # ======================================================================= C. 적용 — 결과 헤더
 
+def line_break(D: dict):
+    """결정 '줄 나눔' → 결과의 모든 문단 모양에 넣을 (breakLatinWord, breakNonLatinWord). "양식"이면 None(그대로)."""
+    how = D.get("줄 나눔", "글자")
+    if how == "양식":
+        return None
+    if how != "글자":
+        raise SystemExit(f"결정 '줄 나눔'은 \"글자\" 또는 \"양식\"이어야 한다: {how!r}")
+    return tf.BREAK_LATIN["글자"], tf.BREAK_NON_LATIN["글자"]
+
+
 class Dst:
-    def __init__(self, base: Pkg):
+    def __init__(self, base: Pkg, line_break=None):
+        """line_break: (breakLatinWord, breakNonLatinWord) — 주면 결과 헤더의 문단 모양 모두(나중에 덧붙이는 것 포함)에 넣는다."""
         self.header = copy.deepcopy(base.header)
+        self.line_break = line_break
+        if line_break:
+            for el in self.children("paraPr"):
+                self.set_line_break(el)
         self.canon = {k: {} for k in LISTS}
         for k in LISTS:
             for el in self.children(k):
@@ -893,7 +912,20 @@ class Dst:
     def ids(self, kind):
         return {e.get("id") for e in self.children(kind)}
 
+    def set_line_break(self, pp):
+        bs = pp.find(q("hh:breakSetting"))
+        if bs is None:  # 한글이 쓴 파일에는 늘 있다 — 없으면 정렬·문단 머리 다음에 만든다
+            bs = etree.Element(q("hh:breakSetting"), {"breakLatinWord": "", "breakNonLatinWord": "", "widowOrphan": "0",
+                                                      "keepWithNext": "0", "keepLines": "0", "pageBreakBefore": "0",
+                                                      "lineWrap": "BREAK"})
+            before = [e for e in pp if local(e) in ("align", "heading")]
+            pp.insert(pp.index(before[-1]) + 1 if before else 0, bs)
+        bs.set("breakLatinWord", self.line_break[0])
+        bs.set("breakNonLatinWord", self.line_break[1])
+
     def add(self, kind, el, dedupe=True) -> str:
+        if kind == "paraPr" and self.line_break:
+            self.set_line_break(el)
         c = canon(el)
         if dedupe and c in self.canon[kind]:
             return self.canon[kind][c]
@@ -1108,7 +1140,7 @@ class Ctx:
         need = [r["문단"] for r in self.roles if r["역할"] == "[판단 필요]"]
         if need:
             raise SystemExit(f"[판단 필요] 문단이 남아 있다: {need} — 역할판단 파일에 정한 뒤 analyze를 다시")
-        self.dst = Dst(self.base)
+        self.dst = Dst(self.base, line_break(self.D))
         self.bins = Bins(dry)
         self.tg = Importer(self.dst, self.tgp, self.bins)
         self.ms = Importer(self.dst, self.msp, self.bins)
@@ -1116,6 +1148,9 @@ class Ctx:
         self.toc = Importer(self.dst, self.tocp, self.bins, recolor=(self.D.get("글자색", "검정") == "검정")) \
             if self.tocp is not None else None
         self.log, self.toc_entries, self.toc_anchor, self.out_roles, self.approved = [], [], {}, [], []
+        if self.dst.line_break:
+            self.log.append("줄 나눔 기준: 모든 문단 모양을 한글 단위 '글자'·영어 단위 '글자'로(결정 '줄 나눔' — "
+                            "긴 경로·주소 때문에 양쪽 정렬한 줄의 낱말 사이가 벌어지지 않게)")
         self.cap_pp = {}
         self.cap_total = Counter()
         self.styled_tbls = []  # 양식 표 모양을 입힌 표(머리행을 제목 셀로 반복해도 되는 표)
@@ -3604,6 +3639,20 @@ def body_refs(R: Run, out_pkg: Pkg):
     return refs, have
 
 
+def check_line_break(R: Run, out_pkg: Pkg):
+    """결정 '줄 나눔'대로 결과의 문단 모양이 모두 바뀌었는지 → (문단 모양 수, 다른 id 목록). "양식"이면 None."""
+    want = line_break(R.D)
+    if not want:
+        return None
+    pps = list(out_pkg.header.iter(q("hh:paraPr")))
+    bad = []
+    for pp in pps:
+        bs = pp.find(q("hh:breakSetting"))
+        if bs is None or (bs.get("breakLatinWord"), bs.get("breakNonLatinWord")) != want:
+            bad.append(pp.get("id"))
+    return len(pps), bad
+
+
 def cmd_verify(R: Run):
     out_pkg = Pkg(R.out)
     roles = json.loads(R.map_path.read_text(encoding="utf-8"))
@@ -3626,6 +3675,11 @@ def cmd_verify(R: Run):
     L += [f"- 다름: {x}" for x in (bad + cbad)[:30]] or ["- 다른 곳 없음"]
     L += ["- 셀 배경: " + ", ".join(f"{n} {c} {v}개" for (n, c), v in fills.items()),
           "- 본문 글자색: " + ", ".join(f"{c} {v}" for c, v in colors.items())]
+    lb = check_line_break(R, out_pkg)
+    if lb:
+        n, bad_ids = lb
+        L.append(f"- {'❌' if bad_ids else '✅'} 줄 나눔 기준 한글 단위 '글자'·영어 단위 '글자'(결정 '줄 나눔'): 문단 모양 {n}개 중 "
+                 + (f"다른 것 {len(bad_ids)}개(id {', '.join(bad_ids[:10])})" if bad_ids else "모두"))
     big = check_tables(R, out_pkg)
     L += ["", f"## 3-1. 한 쪽을 넘는 표 (셀 글자로 어림한 '쪽에서 차지할 높이'가 본문 높이 {body_limit(R, out_pkg) / MM:.0f}mm의 "
               f"{tf.FIT:.0%}를 넘는 표 — 글자처럼 취급이면 쪽 아래로 넘친다)", ""]

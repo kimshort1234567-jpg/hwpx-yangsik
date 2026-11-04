@@ -11,6 +11,9 @@
 - 글자처럼 취급 그림만 있는 줄: 높이 = 그림 높이, 줄 간격 몫은 문단 글자 크기로(다음 줄이 있으면 더한다).
 - 자리 차지로 떠 있는 그림은 그 아래로 문단 줄(빈 줄이라도)이 이어진다. 글 앞으로·뒤로 개체는 자리를 차지하지 않는다.
 - 한글 파일의 줄 나눔 단위는 이름과 반대: breakNonLatinWord "BREAK_WORD" = 어절, "KEEP_WORD" = 글자.
+  영어 단위는 이름대로: breakLatinWord "KEEP_WORD" = 단어, "HYPHENATION" = 하이픈, "BREAK_WORD" = 글자
+  (2026-11-04 한글 2020: 자동화 API로 '글자'를 넣어 저장한 값과 PDF의 줄 끊김으로 확인 → BREAK_LATIN·BREAK_NON_LATIN).
+  어림에서 이어진 영어는 영어 단위와 상관없이 한 묶음으로 센다(크게 어림 — para_lines 참고).
 
 쪽 나눔(한글 PDF로 확인, 2026-11-03):
 - '글자처럼 취급'(treatAsChar=1) 표는 쪽 경계에서 나뉘지 않는다 → 쪽보다 길면 아래가 꼬리말 쪽으로 넘친다.
@@ -33,6 +36,9 @@ OBJ_TAGS = {"tbl", "pic", "container", "ole", "equation", "rect", "ellipse", "li
 FIT = 0.99
 PAGE_BREAK = {"나눔": "CELL", "셀 단위로 나눔": "TABLE"}  # 설문 답(한글 메뉴 이름) → pageBreak 값
 PAGE_BREAK_NAME = {v: k for k, v in PAGE_BREAK.items()}
+# 문단 모양 [기본] 탭 '줄 나눔 기준'(한글 메뉴 이름) → hh:breakSetting 값. 한글 단위는 이름과 반대로 저장된다.
+BREAK_LATIN = {"단어": "KEEP_WORD", "하이픈": "HYPHENATION", "글자": "BREAK_WORD"}  # breakLatinWord(영어 단위)
+BREAK_NON_LATIN = {"어절": "BREAK_WORD", "글자": "KEEP_WORD"}  # breakNonLatinWord(한글 단위)
 
 
 def _q(ns, n):
@@ -124,8 +130,8 @@ class Metrics:
                  "word_hangul": False}
             if e is not None:
                 bs = e.find(_q(HH, "breakSetting"))
-                if bs is not None:  # 이름과 반대: BREAK_WORD = 어절, KEEP_WORD = 글자. 영어 단어는 늘 통째로(어림을 크게)
-                    d["word_hangul"] = bs.get("breakNonLatinWord", "KEEP_WORD") == "BREAK_WORD"
+                if bs is not None:  # 한글 단위는 이름과 반대(BREAK_WORD = 어절). 영어 단위는 보지 않는다 — para_lines 참고
+                    d["word_hangul"] = bs.get("breakNonLatinWord", BREAK_NON_LATIN["글자"]) == BREAK_NON_LATIN["어절"]
                 sw = e.find(_q(HP, "switch"))
                 case = sw.find(_q(HP, "case")) if sw is not None else None
                 src, scale = (case, 1.0) if case is not None else ((sw.find(_q(HP, "default")) if sw is not None else e), 0.5)
@@ -207,7 +213,9 @@ class Metrics:
         if line_h:
             obj_lines.append(line_h)
         base_size = base_size or 1000
-        # 나눔 단위: 어절이면 공백 사이 글자 묶음, 글자면 한 글자씩(영어 단어는 묶음)
+        # 나눔 단위: 한글 어절이면 공백 사이 글자 묶음, 글자면 한 글자씩. 이어진 영어는 영어 단위가 '글자'여도 늘 묶음 —
+        # 한글은 그때 영어를 줄 끝까지 꽉 채우는데, 영어 글자 너비 어림이 조금만 작아도 줄이 모자라게 센다(2026-11-04 한글 2020:
+        # 긴 경로·주소를 넣은 칸 문단 277개 중 글자로 세면 3개가 1줄 적게, 묶어 세면 적게 센 것 0개). 쪽 넘침은 절대 안 되므로.
         units = []
         for c in chars:
             if c[0] in " \t\n":
