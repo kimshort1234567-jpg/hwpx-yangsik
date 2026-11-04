@@ -290,7 +290,8 @@ function extOk(kind, name) {
   return "";
 }
 
-async function takeFile(kind, file) {
+/* saved: 양식 저장소에서 고른 양식이면 그 목록 항목(이름·해시) */
+async function takeFile(kind, file, saved) {
   const errId = kind + "-error";
   showError(errId, "");
   const bad = extOk(kind, file.name);
@@ -299,10 +300,12 @@ async function takeFile(kind, file) {
     await waitEngine();
     showBusy(kind === "template" ? "양식을 분석하는 중…" : "문서를 살펴보는 중…");
     const bytes = await file.arrayBuffer();
+    // 양식은 내용 해시로 '이미 저장한 양식인지' 알아본다(작업자로 넘기면 bytes를 더 못 쓰므로 먼저)
+    const hash = kind !== "template" ? "" : saved && saved.hash ? saved.hash : await fingerprint(bytes);
     const m = await call(kind, { name: file.name, bytes }, [bytes]);
     hideBusy();
     if (!m.res.ok) { showError(errId, errorText(m.res)); return; }
-    if (kind === "template") onTemplate(file.name, m.res.data);
+    if (kind === "template") onTemplate(file, m.res.data, hash, saved);
     else onDocument(file.name, m.res.data);
   } catch (err) {
     hideBusy();
@@ -311,9 +314,10 @@ async function takeFile(kind, file) {
 }
 
 /* ---------------------------------------------------------------- 1. 양식 */
-function onTemplate(name, data) {
+function onTemplate(file, data, hash, saved) {
   const s = data["요약"];
-  state.template = { name, s };
+  const name = file.name;
+  state.template = { name, s, file, hash }; // file은 [+ 양식 저장] 때 다시 읽는다
   state.document = null;
   const has = (ok, text) => `<li class="${ok ? "" : "no"}">${ok ? "✓" : "✕"} ${esc(text)}</li>`;
   const levels = (s["제목 단계"] || []).map((h) => h["번호"]).filter(Boolean).join(" → ");
@@ -325,8 +329,10 @@ function onTemplate(name, data) {
   ].join("");
   const notes = (s["알림"] || []).map((n) => `<li>${esc(n)}</li>`).join("");
   const font = s["본문"] ? `본문 글꼴: ${esc(s["본문"]["글꼴"])} ${s["본문"]["크기"]}pt` : "";
+  const tag = saved ? ` <span class="tag" id="tmpl-tag">저장된 양식</span>` : "";
+  $("template-card").dataset.saved = saved ? saved.id : "";
   $("template-card").innerHTML = `
-    <div class="file"><span>📄 <b>${esc(name)}</b></span><button type="button" class="linkbtn" id="tmpl-change">다른 양식으로 바꾸기</button></div>
+    <div class="file"><span>📄 <b id="tmpl-name">${esc(saved ? saved.name : name)}</b>${tag}</span><button type="button" class="linkbtn" id="tmpl-change">다른 양식으로 바꾸기</button></div>
     <ul class="chips">${chips}</ul>
     <p class="hint" style="margin:6px 0 0">${font}${!s["부분"]["표지"] || !s["부분"]["차례"] ? " · 양식에 없는 표지·차례는 필요하면 간단한 모양으로 만들어 드려요." : ""}</p>
     ${notes ? `<ul class="notes">${notes}</ul>` : ""}`;
@@ -336,6 +342,7 @@ function onTemplate(name, data) {
   $("tmpl-change").addEventListener("click", resetTemplate);
   lock("step2", false);
   resetDocument();
+  syncVault();
   $("drop-document").focus();
 }
 function resetTemplate() {
@@ -345,7 +352,316 @@ function resetTemplate() {
   $("step1").classList.remove("done");
   lock("step2", true);
   resetDocument();
+  syncVault();
 }
+
+/* ---------------------------------------------------------------- 양식 저장소
+   [+ 양식 저장]을 누른 양식을 이 브라우저의 저장 공간(IndexedDB)에 보관해 두고, 다음에 목록에서 눌러 바로 쓴다.
+   파일은 이 컴퓨터 밖으로 나가지 않는다. 목록(meta)과 파일 내용(files)을 따로 두어 목록을 그릴 때 큰 파일을 읽지 않는다.
+   같은 양식인지는 파일 내용의 해시로 알아본다(저장한 양식을 다시 올리면 '저장됨'). */
+const store = (() => {
+  let dbp = null;
+  function open() {
+    if (!dbp) {
+      dbp = new Promise((ok, no) => {
+        const r = indexedDB.open("hwpx-yangsik", 1); // indexedDB가 없거나 막혀 있으면 여기서 던져 no로 간다
+        r.onupgradeneeded = () => {
+          r.result.createObjectStore("meta", { keyPath: "id", autoIncrement: true });
+          r.result.createObjectStore("files");
+        };
+        r.onsuccess = () => {
+          const db = r.result;
+          db.onversionchange = () => { db.close(); dbp = null; };
+          ok(db);
+        };
+        r.onerror = () => no(r.error);
+        r.onblocked = () => no(new Error("다른 창에서 양식 저장소를 쓰는 중입니다. 그 창을 닫고 다시 열어 주세요."));
+      });
+      dbp.catch(() => { dbp = null; });
+    }
+    return dbp;
+  }
+  async function run(names, mode, body) {
+    const db = await open();
+    return new Promise((ok, no) => {
+      const t = db.transaction(names, mode);
+      let out;
+      body(t, (v) => { out = v; });
+      t.oncomplete = () => ok(out);
+      t.onerror = () => no(t.error);
+      t.onabort = () => no(t.error || new Error("저장소 작업이 취소되었습니다."));
+    });
+  }
+  return {
+    list: () => run("meta", "readonly", (t, set) => {
+      const r = t.objectStore("meta").getAll();
+      r.onsuccess = () => set(r.result.sort((a, b) => a.id - b.id));
+    }),
+    add: (rec, buf) => run(["meta", "files"], "readwrite", (t, set) => {
+      const r = t.objectStore("meta").add(rec);
+      r.onsuccess = () => { t.objectStore("files").put(buf, r.result); set({ ...rec, id: r.result }); };
+    }),
+    file: (id) => run("files", "readonly", (t, set) => {
+      const r = t.objectStore("files").get(id);
+      r.onsuccess = () => set(r.result);
+    }),
+    rename: (id, name) => run("meta", "readwrite", (t) => {
+      const s = t.objectStore("meta");
+      const r = s.get(id);
+      r.onsuccess = () => { if (r.result) s.put({ ...r.result, name }); };
+    }),
+    remove: (id) => run(["meta", "files"], "readwrite", (t) => {
+      t.objectStore("meta").delete(id);
+      t.objectStore("files").delete(id);
+    }),
+  };
+})();
+
+async function fingerprint(buf) {
+  try {
+    const h = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+    return "sha256:" + Array.from(h, (b) => b.toString(16).padStart(2, "0")).join("");
+  } catch (_) { // 보안 연결이 아닌 주소(file:// 등)에는 crypto.subtle이 없을 수 있다 → 간단한 해시
+    const a = new Uint8Array(buf);
+    let h = 0x811c9dc5;
+    for (let i = 0; i < a.length; i++) h = Math.imul(h ^ a[i], 0x01000193);
+    return `fnv:${a.length}:${(h >>> 0).toString(16)}`;
+  }
+}
+
+const vault = { ok: false, items: [], busy: false, editing: null, confirm: null, flash: null };
+const PEN = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+const BIN = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function savedNow() { const t = state.template; return t ? vault.items.find((v) => v.hash === t.hash) || null : null; }
+const nb = (s) => s.replace(/ /g, "\u00a0"); // '11월 4일 저장'·'3.8 MB'가 줄 끝에서 갈라지지 않게
+function sizeText(n) { return n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`; }
+function dateText(ms) {
+  const d = new Date(ms);
+  const opt = d.getFullYear() === new Date().getFullYear() ? { month: "long", day: "numeric" } : { year: "numeric", month: "long", day: "numeric" };
+  return d.toLocaleDateString("ko-KR", opt);
+}
+let msgTimer = 0;
+function vaultMsg(text, bad) {
+  const el = $("vault-msg");
+  el.textContent = text || "";
+  el.classList.toggle("bad", !!bad);
+  clearTimeout(msgTimer);
+  if (text && !bad) msgTimer = setTimeout(() => { el.textContent = ""; }, 8000);
+}
+
+function itemHtml(v, i, cur) {
+  const n = `<span class="vi-num" aria-hidden="true">${i + 1}</span>`;
+  if (vault.editing === v.id) {
+    return `<li class="vi editing" data-id="${v.id}">${n}
+      <input class="vi-input" type="text" value="${esc(v.name)}" maxlength="60" aria-label="${i + 1}번 양식의 새 이름">
+      <button type="button" class="icon ok" data-act="rename-ok" aria-label="이름 저장" title="이름 저장">✓</button>
+      <button type="button" class="icon" data-act="rename-cancel" aria-label="이름 바꾸기 취소" title="취소">✕</button></li>`;
+  }
+  if (vault.confirm === v.id) {
+    return `<li class="vi confirm" data-id="${v.id}"><p>‘${esc(v.name)}’ 양식을 저장소에서 지울까요?</p>
+      <div class="vi-ask"><button type="button" class="btn small danger" data-act="delete-ok">지우기</button>
+      <button type="button" class="btn small ghost" data-act="delete-cancel">취소</button></div></li>`;
+  }
+  const on = cur && cur.id === v.id;
+  return `<li class="vi${on ? " on" : ""}${vault.flash === v.id ? " flash" : ""}" data-id="${v.id}">
+    <button type="button" class="vi-main" data-act="use"${on ? ' aria-current="true"' : ""} title="원래 파일: ${esc(v.fileName)}">${n}
+      <span class="vi-text"><span class="vi-name">${esc(v.name)}</span>
+      <span class="vi-meta">${on ? "<b>사용\u00a0중</b> · " : ""}${nb(dateText(v.savedAt) + " 저장")} · ${nb(sizeText(v.size))}</span></span></button>
+    <button type="button" class="icon" data-act="rename" aria-label="${esc(v.name)} 이름 바꾸기" title="이름 바꾸기">${PEN}</button>
+    <button type="button" class="icon del" data-act="delete" aria-label="${esc(v.name)} 지우기" title="지우기">${BIN}</button></li>`;
+}
+function renderVault() {
+  const cur = savedNow();
+  const items = vault.items;
+  $("vault").classList.toggle("empty", !items.length);
+  $("vault-count").textContent = items.length ? `${items.length}개` : "";
+  $("vault-empty").hidden = !vault.ok || items.length > 0;
+  $("vault-list").innerHTML = items.map((v, i) => itemHtml(v, i, cur)).join("");
+  vault.flash = null;
+}
+function renderItem(id) { // 한 항목만 다시 그린다(다른 항목을 누르는 중이면 그 단추가 그대로 남도록)
+  const li = $("vault-list").querySelector(`[data-id="${id}"]`);
+  const i = vault.items.findIndex((v) => v.id === id);
+  if (li && i >= 0) li.outerHTML = itemHtml(vault.items[i], i, savedNow());
+}
+function setMode(editing, confirm) {
+  const touched = new Set([vault.editing, vault.confirm, editing, confirm].filter((x) => x != null));
+  vault.editing = editing;
+  vault.confirm = confirm;
+  touched.forEach(renderItem);
+}
+function focusItem(id, sel = ".vi-main") {
+  const el = $("vault-list").querySelector(`[data-id="${id}"] ${sel}`);
+  if (el) el.focus();
+}
+function syncSave() {
+  const t = state.template;
+  const hit = savedNow();
+  const b = $("save-template");
+  b.disabled = !vault.ok || !t || !!hit || vault.busy;
+  b.classList.toggle("saved", !!hit);
+  b.textContent = hit ? "✓ 저장됨" : vault.busy ? "저장 중…" : "+ 양식 저장";
+  b.title = !vault.ok ? "이 브라우저에서는 양식을 저장할 수 없습니다"
+    : !t ? "양식을 올리면 저장할 수 있습니다"
+      : hit ? `양식 저장소 ${vault.items.indexOf(hit) + 1}번에 저장되어 있습니다` : "이 양식을 양식 저장소에 보관해 다음에도 씁니다";
+}
+function syncVault() { syncSave(); renderVault(); }
+
+async function loadVault() {
+  try {
+    vault.items = await store.list();
+    vault.ok = true;
+  } catch (err) {
+    console.warn("양식 저장소를 열지 못함:", err);
+    vault.ok = false;
+    vault.items = [];
+    vaultMsg("이 브라우저에서는 양식을 저장할 수 없습니다(사이트 데이터 저장이 꺼져 있거나 사생활 보호 창일 수 있습니다).", true);
+  }
+  syncVault();
+}
+
+const channel = "BroadcastChannel" in self ? new BroadcastChannel("hwpx-yangsik-vault") : null;
+if (channel) channel.onmessage = () => loadVault(); // 같은 사이트를 연 다른 창에서 저장·지움
+function announce() { if (channel) channel.postMessage("changed"); }
+let persistAsked = false;
+function keepStorage() { // 저장 공간이 모자랄 때 브라우저가 먼저 지우지 않게 요청(브라우저가 정함)
+  if (persistAsked || !navigator.storage || !navigator.storage.persist) return;
+  persistAsked = true;
+  navigator.storage.persisted().then((p) => p || navigator.storage.persist()).catch(() => {});
+}
+function uniqueName(base) {
+  const names = new Set(vault.items.map((v) => v.name));
+  base = base.trim().slice(0, 60) || "양식";
+  let name = base;
+  for (let k = 2; names.has(name); k++) name = `${base.slice(0, 54)} (${k})`;
+  return name;
+}
+
+$("save-template").addEventListener("click", async () => {
+  const t = state.template;
+  if (!t || vault.busy || savedNow()) return;
+  vault.busy = true;
+  vaultMsg("");
+  syncSave();
+  try {
+    vault.items = await store.list(); // 다른 창에서 같은 양식을 저장했을 수도 있다
+    let rec = savedNow();
+    if (!rec) {
+      const buf = await t.file.arrayBuffer();
+      rec = await store.add({ name: uniqueName(t.name.replace(/\.hwpx$/i, "")), fileName: t.name, size: buf.byteLength,
+        hash: t.hash, savedAt: Date.now() }, buf);
+      vault.items.push(rec);
+      keepStorage();
+      announce();
+    }
+    vault.flash = rec.id;
+    vaultMsg(`‘${rec.name}’ 양식을 저장했습니다. 다음에는 양식 저장소에서 눌러 바로 쓸 수 있습니다.`);
+  } catch (err) {
+    vaultMsg(err && err.name === "QuotaExceededError"
+      ? "저장 공간이 부족해 양식을 저장하지 못했습니다. 양식 저장소에서 쓰지 않는 양식을 지운 뒤 다시 눌러 주세요."
+      : `양식을 저장하지 못했습니다: ${(err && err.message) || err}`, true);
+  } finally {
+    vault.busy = false;
+    syncVault();
+  }
+});
+
+async function useSaved(v) {
+  setMode(null, null);
+  const cur = savedNow();
+  if (cur && cur.id === v.id && !$("template-card").hidden) { // 이미 쓰고 있는 양식
+    $("step2").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return;
+  }
+  vaultMsg("");
+  try {
+    const buf = await store.file(v.id);
+    if (!buf) throw new Error("저장된 파일을 찾지 못했습니다. 목록에서 지우고 양식을 다시 저장해 주세요.");
+    await takeFile("template", new File([buf], v.fileName), v);
+  } catch (err) {
+    showError("template-error", String(err.message || err));
+  }
+}
+
+async function finishRename(id, keep, refocus) {
+  if (vault.editing !== id) return;
+  const inp = $("vault-list").querySelector(`[data-id="${id}"] .vi-input`);
+  const name = inp ? inp.value.trim().slice(0, 60) : "";
+  const v = vault.items.find((x) => x.id === id);
+  vault.editing = null;
+  if (keep && v && name && name !== v.name) {
+    try {
+      await store.rename(id, name);
+      v.name = name;
+      announce();
+      if ($("template-card").dataset.saved === String(id)) $("tmpl-name").textContent = name;
+    } catch (err) {
+      vaultMsg(`이름을 바꾸지 못했습니다: ${(err && err.message) || err}`, true);
+    }
+  }
+  renderItem(id);
+  syncSave();
+  if (refocus) focusItem(id);
+}
+
+async function removeSaved(v) {
+  vault.confirm = null;
+  try {
+    await store.remove(v.id);
+    const i = vault.items.indexOf(v);
+    vault.items = vault.items.filter((x) => x !== v);
+    announce();
+    if ($("template-card").dataset.saved === String(v.id)) {
+      $("template-card").dataset.saved = "";
+      const tag = $("tmpl-tag");
+      if (tag) tag.remove();
+    }
+    vaultMsg(`‘${v.name}’ 양식을 지웠습니다.`);
+    syncVault();
+    const next = vault.items[Math.min(i, vault.items.length - 1)];
+    if (next) focusItem(next.id); else $("vault-title").focus();
+  } catch (err) {
+    vaultMsg(`지우지 못했습니다: ${(err && err.message) || err}`, true);
+    syncVault();
+  }
+}
+
+const vlist = $("vault-list");
+vlist.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const id = +b.closest("[data-id]").dataset.id;
+  const v = vault.items.find((x) => x.id === id);
+  if (!v) return;
+  const act = b.dataset.act;
+  if (act === "use") useSaved(v);
+  else if (act === "rename") {
+    setMode(id, null);
+    const inp = vlist.querySelector(`[data-id="${id}"] .vi-input`);
+    if (inp) { inp.focus(); inp.select(); }
+  } else if (act === "rename-ok") finishRename(id, true, true);
+  else if (act === "rename-cancel") finishRename(id, false, true);
+  else if (act === "delete") { setMode(null, id); focusItem(id, '[data-act="delete-cancel"]'); }
+  else if (act === "delete-ok") removeSaved(v);
+  else if (act === "delete-cancel") { setMode(null, null); focusItem(id); }
+});
+// 이름 칸의 ✓·✕를 누를 때 칸이 먼저 포커스를 잃어 '저장'되지 않게
+vlist.addEventListener("mousedown", (e) => { if (e.target.closest(".vi.editing button")) e.preventDefault(); });
+vlist.addEventListener("keydown", (e) => {
+  if (!e.target.classList.contains("vi-input")) return;
+  if (e.isComposing || e.keyCode === 229) return; // 한글 조합 중 Enter는 글자 확정용
+  const id = +e.target.closest("[data-id]").dataset.id;
+  if (e.key === "Enter") { e.preventDefault(); finishRename(id, true, true); }
+  else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finishRename(id, false, true); }
+});
+vlist.addEventListener("focusout", (e) => { // 이름 칸 밖을 누르면 그대로 저장
+  if (!e.target.classList.contains("vi-input")) return;
+  const li = e.target.closest("[data-id]");
+  if (e.relatedTarget && li.contains(e.relatedTarget)) return;
+  finishRename(+li.dataset.id, true, false);
+});
+loadVault();
 
 /* ---------------------------------------------------------------- 2. 문서 + 설문 */
 function onDocument(name, data) {
