@@ -494,10 +494,11 @@ class Run:
             else:
                 pk = [Pkg(f) for f in self.tfiles]
                 out = {}
-                for key, name in (("본문양식", "본문"), ("표지양식", "표지"), ("목차양식", "차례")):
+                for key, name in (("본문양식", "본문"), ("표지양식", "표지"), ("목차양식", "차례"), ("표그림양식", "표그림")):
                     d = self.prof["부분"].get(name)
                     out[key] = PartPkg(pk[d["파일"]], [tuple(x) for x in d["범위"]], name) if d else None
-                out["표그림양식"] = out["본문양식"]
+                if out["표그림양식"] is None:  # 여러 파일 양식에서 표·그림을 다른 파일에서 가져올 때만 따로(그 밖에는 본문 부분)
+                    out["표그림양식"] = out["본문양식"]
                 self._parts = out
         return self._parts
 

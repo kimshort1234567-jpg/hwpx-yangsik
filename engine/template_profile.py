@@ -251,14 +251,17 @@ def body_roles(desc: Desc, rows):
     return R, T, cls, notes
 
 
-def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts):
-    def para(ref, kind="본문"):
+def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None):
+    """요약. tg=(desc, rows, cls): 표·그림 역할(T)을 다른 파일에서 가져왔을 때 그 파일의 것(없으면 본문 파일)."""
+    t_desc, t_rows, t_cls = tg or (desc, rows, cls)
+
+    def para(ref, kind="본문", d=desc, rs=rows):
         if not ref:
             return None
-        r = rows[int(ref[1:])]
+        r = rs[int(ref[1:])]
         cid = text_run_cid(r["p"])
-        fonts = desc.char_sig(cid)
-        return {"보기": r["text"].strip()[:40], "글꼴": fonts[0], "크기": pt(desc, cid), "굵게": fonts[3]}
+        fonts = d.char_sig(cid)
+        return {"보기": r["text"].strip()[:40], "글꼴": fonts[0], "크기": pt(d, cid), "굵게": fonts[3]}
     heads = []
     for n in range(1, 6):
         ref = R.get(f"{n}수준")
@@ -269,29 +272,30 @@ def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts):
     for kind in ("표", "그림"):
         ref = T.get(kind)
         if ref:
-            cap = cls[int(ref[1:])].get("캡션") or {}
+            cap = t_cls[int(ref[1:])].get("캡션") or {}
             caps[kind] = {"캡션": (cap.get("번호", "") + " " + (cap.get("글자") or "")).strip(), "위치": cap.get("위치") or "없음"}
     hf = {}
     if T.get("머리말꼬리말"):
-        p = rows[int(T["머리말꼬리말"][1:])]["p"]
+        p = t_rows[int(T["머리말꼬리말"][1:])]["p"]
         for tag, name in (("header", "머리말"), ("footer", "꼬리말")):
             el = p.find(f".//{q('hp:' + tag)}")
             if el is not None:
                 hf[name] = " ".join(own_text(x) for x in el.iter(q("hp:p"))).replace("\t", " ⇥ ").strip()
     pn = None
     if T.get("쪽번호"):
-        el = rows[int(T["쪽번호"][1:])]["p"].find(f".//{q('hp:pageNum')}")
+        el = t_rows[int(T["쪽번호"][1:])]["p"].find(f".//{q('hp:pageNum')}")
         side = el.get("sideChar", "")
         pn = {"위치": el.get("pos"), "모양": f"{side} 1 {side}".strip() if side else "1"}
     missing = [k for k in ("본문", "빈 줄", "1수준") if k not in R] + [k for k in ("표", "그림") if k not in T]
     return {"부분": {k: bool(parts.get(k)) for k in ("표지", "차례", "본문")},
-            "표지 줄": cover_lines, "장 제목": para(T.get("장 제목")), "제목 단계": heads, "본문": para(R.get("본문")),
+            "표지 줄": cover_lines, "장 제목": para(T.get("장 제목"), d=t_desc, rs=t_rows), "제목 단계": heads,
+            "본문": para(R.get("본문")),
             "표": caps.get("표"), "그림": caps.get("그림"), **hf, "쪽 번호": pn,
             "차례 항목": sorted(k for k in toc_R if k not in ("머리", "제목 뒤 빈 줄")), "없는 것": missing}
 
 
-def analyze(path, profile_path=None) -> dict:
-    """양식 파일 → 프로필(dict). profile_path를 주면 JSON으로 쓰고 양식 파일 경로는 그 폴더 기준 상대 경로로."""
+def scan(path) -> dict:
+    """파일 하나 → 찾은 부분(표지·차례·본문)과 그 문단. 본문이 없어도 된다(표지만·차례만 든 파일)."""
     path = Path(path)
     pk = Pkg(path)
     desc = Desc(pk.header)
@@ -306,36 +310,108 @@ def analyze(path, profile_path=None) -> dict:
             cover_i = i
             break
     body_from = (last_toc + 1) if last_toc is not None else ((cover_i + 1) if cover_i is not None else 0)
-    if body_from >= len(groups):
-        raise ValueError("본문을 찾지 못했다(표지·차례 뒤에 쪽이 없음)")
     parts, part_rows, notes = {}, {}, []
     if cover_i is not None:
         parts["표지"], part_rows["표지"] = part_of([groups[cover_i]])
     if first_toc is not None:
         parts["차례"], part_rows["차례"] = part_of(groups[first_toc:last_toc + 1])
-    parts["본문"], part_rows["본문"] = part_of(groups[body_from:])
+    if body_from < len(groups):
+        parts["본문"], part_rows["본문"] = part_of(groups[body_from:])
     if first_toc is not None and cover_i is None and first_toc > 0:
         notes.append(f"차례 앞 {first_toc}쪽은 표지로 보지 않음(제출문·요약 등)")
-    R, T, cls, bnotes = body_roles(desc, part_rows["본문"])
-    notes += bnotes
+    return {"path": path, "desc": desc, "parts": parts, "rows": part_rows, "notes": notes}
+
+
+def body_score(sc) -> tuple:
+    """본문 모양을 가져올 파일: 본문 문단이 있고, 제목 단계가 많고, 본문 글이 긴 파일."""
+    R = sc["R"]
+    levels = sum(1 for k in R if k.endswith("수준"))
+    text = sum(len(r["text"].strip()) for r in sc["rows"]["본문"])
+    return (bool(R.get("본문")), levels, text)
+
+
+def tg_score(sc) -> int:
+    """표·그림·장 제목·머리말 모양을 가져올 파일: 표·그림 예시(2점씩), 진짜 '제N장' 장 제목(2점 — 큰 제목으로 대신한 것은 1점),
+    머리말꼬리말·쪽 번호(1점씩)."""
+    T, cls = sc["T"], sc["cls"]
+    s = 2 * bool(T.get("표")) + 2 * bool(T.get("그림")) + bool(T.get("머리말꼬리말")) + bool(T.get("쪽번호"))
+    if T.get("장 제목"):
+        s += 2 if cls[int(T["장 제목"][1:])]["역할"] == "장 제목" else 1
+    return s
+
+
+def analyze(path, profile_path=None) -> dict:
+    """양식 파일(하나 또는 여러 개) → 프로필(dict). profile_path를 주면 JSON으로 쓰고 양식 파일 경로는 그 폴더 기준 상대 경로로.
+
+    여러 파일이면(회사 양식이 앞표지·목차·본문 스타일·표 그림 양식처럼 나뉜 경우) 부분마다 알맞은 파일을 고른다.
+      - 본문(본문·제목 단계·빈 줄, 쪽 설정·글꼴의 바탕): 본문 문단이 있고 제목 단계가 가장 많은 파일
+      - 표·그림·장 제목·머리말·쪽 번호: tg_score가 가장 높은 파일(같으면 본문 파일)
+      - 표지·차례: 그 부분만 든 파일 → 본문 파일 안의 것 → 다른 파일 안의 것 순서(앞에 올린 파일 먼저)"""
+    paths = [Path(p) for p in path] if isinstance(path, (list, tuple)) else [Path(path)]
+    scans = [scan(p) for p in paths]
+    for sc in scans:
+        if "본문" in sc["parts"]:
+            sc["R"], sc["T"], sc["cls"], sc["bnotes"] = body_roles(sc["desc"], sc["rows"]["본문"])
+    bodies = [i for i, sc in enumerate(scans) if "본문" in sc["parts"]]
+    if not bodies:
+        raise ValueError("본문을 찾지 못했다(표지·차례 뒤에 쪽이 없음)")
+    bi = max(bodies, key=lambda i: (body_score(scans[i]), -i))
+    ti = max(bodies, key=lambda i: (tg_score(scans[i]), i == bi, -i))
+    B, TG = scans[bi], scans[ti]
+
+    def pick_part(name):
+        own = [i for i, sc in enumerate(scans) if name in sc["parts"] and "본문" not in sc["parts"]]
+        if own:
+            return own[0]
+        if name in B["parts"]:
+            return bi
+        return next((i for i, sc in enumerate(scans) if name in sc["parts"]), None)
+    ci, oi = pick_part("표지"), pick_part("차례")
+    used = sorted({i for i in (bi, ti, ci, oi) if i is not None})
+    fidx = {i: n for n, i in enumerate(used)}  # 프로필 '양식파일' 안 번호(쓰는 파일만)
+
+    # 장 제목 알림은 표·그림 역할(T)을 가져온 파일의 것, 나머지(제목 단계 등)는 본문 파일의 것
+    notes = list(B["notes"]) + [x for x in B["bnotes"] if "장 제목" not in x] + [x for x in TG["bnotes"] if "장 제목" in x]
+    if ti == bi:
+        notes = list(B["notes"]) + list(B["bnotes"])  # 파일 하나: 예전 순서 그대로
+    R, T, cls = B["R"], TG["T"], B["cls"]
     roles = {"본문": R, "표그림": T}
+    parts = {}
     cover_lines = []
-    if "표지" in parts:
-        roles["표지"], cover_lines = cover_roles(desc, part_rows["표지"])
+    if ci is not None:
+        parts["표지"] = {"파일": fidx[ci], "범위": scans[ci]["parts"]["표지"]}
+        roles["표지"], cover_lines = cover_roles(scans[ci]["desc"], scans[ci]["rows"]["표지"])
     toc_R = {}
-    if "차례" in parts:
-        toc_R, tnotes = toc_roles(desc, part_rows["차례"])
+    if oi is not None:
+        parts["차례"] = {"파일": fidx[oi], "범위": scans[oi]["parts"]["차례"]}
+        toc_R, tnotes = toc_roles(scans[oi]["desc"], scans[oi]["rows"]["차례"])
         roles["목차"] = toc_R
         notes += tnotes
+    parts["본문"] = {"파일": fidx[bi], "범위": B["parts"]["본문"]}
+    if ti != bi:
+        parts["표그림"] = {"파일": fidx[ti], "범위": TG["parts"]["본문"]}
+
+    def rel(p):
+        if profile_path is None:
+            return p.name
+        here = Path(profile_path).resolve().parent
+        return str(p.resolve().relative_to(here)) if p.resolve().is_relative_to(here) else str(p.resolve())
+    names = [p.name for p in paths]
     prof = {
         "버전": 2,
-        "설명": f"{path.name}에서 자동으로 찾은 양식(template_profile.py)",
-        "양식파일": [path.name if profile_path is None else str(Path(path).resolve().relative_to(Path(profile_path).resolve().parent))
-                 if Path(path).resolve().is_relative_to(Path(profile_path).resolve().parent) else str(Path(path).resolve())],
-        "부분": {k: ({"파일": 0, "범위": v} if v else None) for k, v in parts.items()},
+        "설명": (f"{names[0]}에서" if len(paths) == 1 else f"{len(paths)}개 파일({', '.join(names)})에서") + " 자동으로 찾은 양식(template_profile.py)",
+        "양식파일": [rel(paths[i]) for i in used],
+        "부분": parts,
         "양식역할": roles,
     }
-    prof["요약"] = describe(desc, part_rows["본문"], cls, R, T, cover_lines, toc_R, parts)
+    prof["요약"] = describe(B["desc"], B["rows"]["본문"], cls, R, T, cover_lines, toc_R, parts,
+                          tg=(TG["desc"], TG["rows"]["본문"], TG["cls"]) if ti != bi else None)
+    if len(paths) > 1:
+        unused = [names[i] for i in range(len(paths)) if i not in used]
+        prof["요약"]["파일"] = {"본문": names[bi], "표·그림": names[ti], "표지": names[ci] if ci is not None else None,
+                             "차례": names[oi] if oi is not None else None, "안 씀": unused}
+        if unused:
+            notes.append(f"쓰지 않은 파일: {', '.join(unused)} — 같은 부분을 다른 파일에서 가져왔습니다")
     prof["요약"]["알림"] = notes
     if profile_path:
         Path(profile_path).write_text(json.dumps(prof, ensure_ascii=False, indent=1), encoding="utf-8")

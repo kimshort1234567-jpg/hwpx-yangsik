@@ -163,6 +163,12 @@ main.layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items:
 .card .file { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .card .file b { overflow-wrap: anywhere; }
 .card .file > span { min-width: 0; flex: 1 1 260px; }
+.card .file-acts { display: flex; gap: 14px; flex-wrap: wrap; }
+.tfiles { list-style: none; margin: 10px 0 0; padding: 8px 10px; border-radius: 10px; background: var(--bg); font-size: 14px; }
+.tfiles li { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; padding: 2px 0; }
+.tf-name { overflow-wrap: anywhere; }
+.tf-role { font-size: 12px; font-weight: 600; padding: 0 8px; border-radius: 999px; background: var(--brand-soft); color: var(--brand); }
+.tf-role.no { background: var(--line); color: var(--muted); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; padding: 0; list-style: none; }
 .chips li { font-size: 13px; padding: 3px 10px; border-radius: 999px; background: var(--ok-soft); color: var(--ok); }
 .chips li.no { background: var(--bg); color: var(--muted); }

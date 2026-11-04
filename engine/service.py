@@ -52,20 +52,35 @@ def check_ext(path, what):
 # ======================================================================= 1. 양식
 
 def analyze_template(src, work) -> dict:
+    """양식 파일 하나(src) 또는 여러 개(목록 — 앞표지·목차·본문 스타일·표 그림 양식처럼 나뉜 회사 양식)를 분석한다."""
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
-    check_ext(src, "양식")
-    dst = work / "양식.hwpx"
-    if Path(src).resolve() != dst.resolve():
-        shutil.copy(src, dst)
+    srcs = [Path(s) for s in src] if isinstance(src, (list, tuple)) else [Path(src)]
+    if not srcs:
+        raise UserError("양식 파일을 올려 주세요.")
+    for s in srcs:
+        check_ext(s, "양식")
+    for old in work.glob("양식*.hwpx"):  # 지난번 양식 사본(파일 수가 달랐을 수 있다)
+        if all(old.resolve() != s.resolve() for s in srcs):
+            old.unlink()
+    dsts = [work / "양식.hwpx"] if len(srcs) == 1 else [work / f"양식_{n + 1}.hwpx" for n in range(len(srcs))]
+    for s, d in zip(srcs, dsts):
+        if s.resolve() != d.resolve():
+            shutil.copy(s, d)
     try:
-        prof = tp.analyze(dst, work / "양식프로필.json")
+        prof = tp.analyze(dsts[0] if len(dsts) == 1 else dsts, work / "양식프로필.json")
     except ValueError:
-        raise UserError("양식에서 본문 쪽을 찾지 못했습니다. 표지나 차례만 있는 파일이 아니라 본문이 들어 있는 보고서를 올려 주세요.")
+        raise UserError("양식에서 본문 쪽을 찾지 못했습니다. 표지나 차례만 있는 파일이 아니라 본문이 들어 있는 보고서를 "
+                        + ("함께 " if len(srcs) > 1 else "") + "올려 주세요.")
     s = prof["요약"]
+    if len(srcs) > 1:  # 요약의 파일 이름을 사용자가 올린 이름으로
+        names = {d.name: x.name for d, x in zip(dsts, srcs)}
+        f = s["파일"]
+        s["파일"] = {k: ([names.get(n, n) for n in v] if isinstance(v, list) else names.get(v, v) if v else v) for k, v in f.items()}
+        s["알림"] = [re.sub(r"양식_\d+\.hwpx", lambda m: names.get(m.group(0), m.group(0)), x) for x in s["알림"]]
     if not prof["양식역할"]["본문"].get("본문"):
         raise UserError("양식에서 본문 문단(긴 글)을 찾지 못했습니다. 본문이 들어 있는 보고서 파일을 올려 주세요.")
-    return {"요약": s, "이름": Path(src).name}
+    return {"요약": s, "이름": srcs[0].name if len(srcs) == 1 else f"{srcs[0].name} 외 {len(srcs) - 1}개"}
 
 
 # ======================================================================= 2. 원고
@@ -368,6 +383,7 @@ def run_all(template, document, work, options) -> dict:
 
 USAGE = """사용:
   python3 service.py inspect <양식.hwpx> <원고.hwpx|.docx> <작업 폴더>   # 1·2단계: 양식 분석 + 원고 살펴보기(설문 전)
+    양식이 여러 파일(앞표지·목차·본문 스타일·표 그림 양식 등)이면 <양식.hwpx> 자리에 '|'로 이어 적는다: "앞표지.hwpx|목차.hwpx|본문.hwpx"
   python3 service.py convert <작업 폴더> '<설문 답 JSON>'               # 3단계: 결과 .hwpx + 검증
   python3 service.py <양식> <원고> <작업 폴더> ['<설문 답 JSON>']        # 한 번에
 설문 답 JSON: {"표지":{"만들기":true,"제목":""},"차례":{"만들기":true},"쪽번호":{"방식":"본문부터","시작":1},
@@ -382,11 +398,12 @@ def cli(a) -> int:
     try:
         with contextlib.redirect_stdout(sys.stderr):
             if a and a[0] == "inspect" and len(a) == 4:
-                out = {"양식": analyze_template(a[1], a[3]), "원고": inspect_document(a[2], a[3])}
+                tm = a[1].split("|") if "|" in a[1] else a[1]
+                out = {"양식": analyze_template(tm, a[3]), "원고": inspect_document(a[2], a[3])}
             elif a and a[0] == "convert" and len(a) in (2, 3):
                 out = convert(a[1], json.loads(a[2]) if len(a) > 2 else {})
             elif len(a) in (3, 4) and a[0] not in ("inspect", "convert"):
-                out = run_all(a[0], a[1], a[2], json.loads(a[3]) if len(a) > 3 else {})
+                out = run_all(a[0].split("|") if "|" in a[0] else a[0], a[1], a[2], json.loads(a[3]) if len(a) > 3 else {})
             else:
                 out = None
     except UserError as e:
