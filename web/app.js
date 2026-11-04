@@ -38,10 +38,15 @@ def call(name, args_json):
       if (!py) throw new Error("엔진이 아직 준비되지 않았습니다.");
       let args;
       if (m.type === "template" || m.type === "document") {
-        py.FS.mkdirTree("/in");
-        const path = "/in/" + m.name.replace(/[\\/]/g, "_");
-        py.FS.writeFile(path, new Uint8Array(m.bytes));
-        args = [path, "/work"];
+        // 양식은 여러 파일일 수 있다(앞표지·목차·본문 스타일 등) — 이름이 같아도 겹치지 않게 번호 폴더에
+        const paths = m.list.map((f, i) => {
+          const dir = m.type === "document" ? "/in" : `/in/t${i}`;
+          py.FS.mkdirTree(dir);
+          const path = dir + "/" + f.name.replace(/[\\/]/g, "_");
+          py.FS.writeFile(path, new Uint8Array(f.bytes));
+          return path;
+        });
+        args = [paths.length === 1 ? paths[0] : paths, "/work"];
       } else if (m.type === "convert") {
         args = ["/work", m.options];
       }
@@ -126,7 +131,7 @@ function errorText(res) {
 
 /* ---------------------------------------------------------------- 파일 받기 */
 const state = { template: null, document: null, result: null, kind: "template" };
-const ACCEPT = { template: ".hwpx", document: ".hwpx,.docx" };
+const ACCEPT = { template: ".hwpx", "template-add": ".hwpx", document: ".hwpx,.docx" };
 
 document.querySelectorAll("[data-import]").forEach((b) =>
   b.addEventListener("click", () => { state.kind = b.dataset.import; openImport(); }));
@@ -139,9 +144,13 @@ $("from-device").addEventListener("click", () => {
   const inp = $("file-input");
   inp.value = "";
   inp.accept = ACCEPT[state.kind];
+  inp.multiple = state.kind !== "document"; // 양식은 여러 파일을 한꺼번에(앞표지·목차·본문 스타일·표 그림 양식 등)
   inp.click();
 });
-$("file-input").addEventListener("change", (e) => { const f = e.target.files[0]; if (f) takeFile(state.kind, f); });
+$("file-input").addEventListener("change", (e) => {
+  const fs = [...e.target.files];
+  if (fs.length) takeFile(state.kind, state.kind === "document" ? fs[0] : fs);
+});
 
 for (const kind of ["template", "document"]) {
   const zone = $("drop-" + kind);
@@ -150,8 +159,8 @@ for (const kind of ["template", "document"]) {
   zone.addEventListener("drop", (e) => {
     e.preventDefault();
     zone.classList.remove("over");
-    const f = e.dataTransfer.files[0];
-    if (f) takeFile(kind, f);
+    const fs = [...e.dataTransfer.files];
+    if (fs.length) takeFile(kind, kind === "document" ? fs[0] : fs);
   });
   zone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); state.kind = kind; openImport(); } });
 }
@@ -221,19 +230,20 @@ function drivePick(token, kind) {
     const P = google.picker;
     const mine = new P.DocsView(P.ViewId.DOCS).setIncludeFolders(true).setMode(P.DocsViewMode.LIST);
     const shared = new P.DocsView(P.ViewId.DOCS).setEnableDrives(true).setIncludeFolders(true).setMode(P.DocsViewMode.LIST);
-    new P.PickerBuilder()
+    const b = new P.PickerBuilder()
       .setAppId(GOOGLE.appId)
       .setDeveloperKey(GOOGLE.apiKey)
       .setOAuthToken(token)
       .setLocale("ko")
-      .setTitle(kind === "template" ? "양식으로 쓸 보고서(.hwpx) 고르기" : "바꿀 문서(.docx·.hwpx) 고르기")
+      .setTitle(kind === "document" ? "바꿀 문서(.docx·.hwpx) 고르기" : "양식 파일(.hwpx) 고르기 — 여러 개를 함께 골라도 됩니다")
       .addView(mine)
       .addView(shared)
-      .enableFeature(P.Feature.SUPPORT_DRIVES)
-      .setCallback((d) => {
-        if (d[P.Response.ACTION] === P.Action.PICKED) ok(d[P.Response.DOCUMENTS][0]);
-        else if (d[P.Response.ACTION] === P.Action.CANCEL) ok(null);
-      })
+      .enableFeature(P.Feature.SUPPORT_DRIVES);
+    if (kind !== "document") b.enableFeature(P.Feature.MULTISELECT_ENABLED);
+    b.setCallback((d) => {
+      if (d[P.Response.ACTION] === P.Action.PICKED) ok(d[P.Response.DOCUMENTS]);
+      else if (d[P.Response.ACTION] === P.Action.CANCEL) ok(null);
+    })
       .build()
       .setVisible(true);
   });
@@ -246,7 +256,7 @@ async function driveDownload(token, doc, kind) {
   let url = `https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`;
   if (mime === GDOC) {
     // 구글 문서로 저장된 글은 워드(.docx)로 내보내 받는다
-    if (kind === "template") throw new Error("양식은 한글 .hwpx 파일이어야 합니다. 구글 문서는 바꿀 문서로만 쓸 수 있습니다.");
+    if (kind !== "document") throw new Error("양식은 한글 .hwpx 파일이어야 합니다. 구글 문서는 바꿀 문서로만 쓸 수 있습니다.");
     url = `https://www.googleapis.com/drive/v3/files/${id}/export?mimeType=${encodeURIComponent(DOCX)}`;
     if (!/\.docx$/i.test(name)) name += ".docx";
   } else if (mime.startsWith("application/vnd.google-apps.")) {
@@ -263,18 +273,19 @@ async function driveDownload(token, doc, kind) {
 
 $("from-drive").addEventListener("click", async () => {
   const kind = state.kind;
-  const errId = kind + "-error";
+  const errId = (kind === "document" ? "document" : "template") + "-error";
   closeModal("import-modal");
   showError(errId, "");
   try {
     await googleReady();
     const token = await driveToken();
-    const doc = await drivePick(token, kind);
-    if (!doc) return;
+    const docs = await drivePick(token, kind);
+    if (!docs || !docs.length) return;
     showBusy("드라이브에서 파일을 받는 중…");
-    const file = await driveDownload(token, doc, kind);
+    const files = [];
+    for (const doc of docs) files.push(await driveDownload(token, doc, kind));
     hideBusy();
-    await takeFile(kind, file);
+    await takeFile(kind, kind === "document" ? files[0] : files);
   } catch (err) {
     hideBusy();
     const msg = String(err.message || err);
@@ -285,39 +296,67 @@ $("from-drive").addEventListener("click", async () => {
 function extOk(kind, name) {
   const ext = name.toLowerCase().split(".").pop();
   if (ext === "hwp") return "한글(.hwp) 파일은 먼저 한글에서 [파일] → [다른 이름으로 저장] → 파일 형식 'HWPX'로 저장한 뒤 올려 주세요.";
-  if (kind === "template" && ext !== "hwpx") return "양식은 한글 .hwpx 파일만 받을 수 있습니다.";
+  if (kind !== "document" && ext !== "hwpx") return `양식은 한글 .hwpx 파일만 받을 수 있습니다(${name}).`;
   if (kind === "document" && !["hwpx", "docx"].includes(ext)) return "문서는 .docx 또는 .hwpx 파일만 받을 수 있습니다.";
   return "";
 }
 
-/* saved: 양식 저장소에서 고른 양식이면 그 목록 항목(이름·해시) */
-async function takeFile(kind, file, saved) {
+/* 받은 파일 처리. kind: "document"(문서 하나) / "template"(양식 — 파일 하나 또는 여러 개) /
+   "template-add"(지금 양식에 파일을 더함). saved: 양식 저장소에서 고른 양식이면 그 목록 항목(이름·해시) */
+async function takeFile(kind, input, saved) {
+  let files = Array.isArray(input) ? input : [input];
+  if (kind === "template-add") {
+    const had = state.template ? state.template.files : [];
+    const key = (f) => f.name + "/" + f.size;
+    files = [...had, ...files.filter((f) => !had.some((h) => key(h) === key(f)))];
+    kind = "template";
+  }
   const errId = kind + "-error";
   showError(errId, "");
-  const bad = extOk(kind, file.name);
+  const bad = files.map((f) => extOk(kind, f.name)).find(Boolean);
   if (bad) { showError(errId, bad); return; }
   try {
     await waitEngine();
-    showBusy(kind === "template" ? "양식을 분석하는 중…" : "문서를 살펴보는 중…");
-    const bytes = await file.arrayBuffer();
+    showBusy(kind === "template" ? (files.length > 1 ? `양식 파일 ${files.length}개를 분석하는 중…` : "양식을 분석하는 중…") : "문서를 살펴보는 중…");
+    const list = [];
+    for (const f of files) list.push({ name: f.name, bytes: await f.arrayBuffer() });
     // 양식은 내용 해시로 '이미 저장한 양식인지' 알아본다(작업자로 넘기면 bytes를 더 못 쓰므로 먼저)
-    const hash = kind !== "template" ? "" : saved && saved.hash ? saved.hash : await fingerprint(bytes);
-    const m = await call(kind, { name: file.name, bytes }, [bytes]);
+    let hash = "";
+    if (kind === "template") {
+      if (saved && saved.hash) hash = saved.hash;
+      else {
+        const hs = [];
+        for (const x of list) hs.push(await fingerprint(x.bytes));
+        hash = hs.length === 1 ? hs[0] : "set:" + hs.sort().join("+"); // 묶음은 파일 순서와 상관없이 같은 양식
+      }
+    }
+    const m = await call(kind, { list }, list.map((x) => x.bytes));
     hideBusy();
-    if (!m.res.ok) { showError(errId, errorText(m.res)); return; }
-    if (kind === "template") onTemplate(file, m.res.data, hash, saved);
-    else onDocument(file.name, m.res.data);
+    if (!m.res.ok) {
+      // 양식 분석이 실패하면 엔진 쪽 양식도 이미 바뀌었으므로 화면의 양식도 비운다(다시 고르게)
+      if (kind === "template" && state.template) resetTemplate();
+      showError(errId, errorText(m.res));
+      return;
+    }
+    if (kind === "template") onTemplate(files, m.res.data, hash, saved);
+    else onDocument(files[0].name, m.res.data);
   } catch (err) {
     hideBusy();
     showError(errId, String(err.message || err));
   }
 }
+function setName(files, s) { // 저장소에 넣을 때 기본 이름: 파일 하나면 그 이름, 여러 개면 '본문 파일 외 n개'
+  const stem = (n) => n.replace(/\.hwpx$/i, "");
+  if (files.length === 1) return stem(files[0].name);
+  const body = (s["파일"] && s["파일"]["본문"]) || files[0].name;
+  return `${stem(body)} 외 ${files.length - 1}개`;
+}
 
 /* ---------------------------------------------------------------- 1. 양식 */
-function onTemplate(file, data, hash, saved) {
+function onTemplate(files, data, hash, saved) {
   const s = data["요약"];
-  const name = file.name;
-  state.template = { name, s, file, hash }; // file은 [+ 양식 저장] 때 다시 읽는다
+  const name = setName(files, s);
+  state.template = { name, s, files, hash }; // files는 [+ 양식 저장]·파일 더하기 때 다시 읽는다
   state.document = null;
   const has = (ok, text) => `<li class="${ok ? "" : "no"}">${ok ? "✓" : "✕"} ${esc(text)}</li>`;
   const levels = (s["제목 단계"] || []).map((h) => h["번호"]).filter(Boolean).join(" → ");
@@ -331,8 +370,20 @@ function onTemplate(file, data, hash, saved) {
   const font = s["본문"] ? `본문 글꼴: ${esc(s["본문"]["글꼴"])} ${s["본문"]["크기"]}pt` : "";
   const tag = saved ? ` <span class="tag" id="tmpl-tag">저장된 양식</span>` : "";
   $("template-card").dataset.saved = saved ? saved.id : "";
+  // 여러 파일 양식: 어느 부분을 어느 파일에서 가져왔는지
+  const fmap = s["파일"];
+  const roleOf = (n) => fmap ? ["표지", "차례", "본문", "표·그림"].filter((k) => fmap[k] === n) : [];
+  const flist = files.length > 1 ? `<ul class="tfiles">${files.map((f) => {
+    const r = roleOf(f.name);
+    return `<li><span class="tf-name">${esc(f.name)}</span> ${r.length ? r.map((x) => `<span class="tf-role">${esc(x)}</span>`).join("")
+      : '<span class="tf-role no">안 씀</span>'}</li>`;
+  }).join("")}</ul>` : "";
+  const shown = saved ? saved.name : files.length === 1 ? files[0].name : name;
   $("template-card").innerHTML = `
-    <div class="file"><span>📄 <b id="tmpl-name">${esc(saved ? saved.name : name)}</b>${tag}</span><button type="button" class="linkbtn" id="tmpl-change">다른 양식으로 바꾸기</button></div>
+    <div class="file"><span>📄 <b id="tmpl-name">${esc(shown)}</b>${tag}</span>
+      <span class="file-acts"><button type="button" class="linkbtn" id="tmpl-add">+ 파일 더하기</button>
+      <button type="button" class="linkbtn" id="tmpl-change">다른 양식으로 바꾸기</button></span></div>
+    ${flist}
     <ul class="chips">${chips}</ul>
     <p class="hint" style="margin:6px 0 0">${font}${!s["부분"]["표지"] || !s["부분"]["차례"] ? " · 양식에 없는 표지·차례는 필요하면 간단한 모양으로 만들어 드려요." : ""}</p>
     ${notes ? `<ul class="notes">${notes}</ul>` : ""}`;
@@ -340,6 +391,7 @@ function onTemplate(file, data, hash, saved) {
   $("drop-template").hidden = true;
   $("step1").classList.add("done");
   $("tmpl-change").addEventListener("click", resetTemplate);
+  $("tmpl-add").addEventListener("click", () => { state.kind = "template-add"; openImport(); });
   lock("step2", false);
   resetDocument();
   syncVault();
@@ -465,9 +517,9 @@ function itemHtml(v, i, cur) {
   }
   const on = cur && cur.id === v.id;
   return `<li class="vi${on ? " on" : ""}${vault.flash === v.id ? " flash" : ""}" data-id="${v.id}">
-    <button type="button" class="vi-main" data-act="use"${on ? ' aria-current="true"' : ""} title="원래 파일: ${esc(v.fileName)}">${n}
+    <button type="button" class="vi-main" data-act="use"${on ? ' aria-current="true"' : ""} title="원래 파일: ${esc((v.files || [{ name: v.fileName }]).map((f) => f.name).join(", "))}">${n}
       <span class="vi-text"><span class="vi-name">${esc(v.name)}</span>
-      <span class="vi-meta">${on ? "<b>사용\u00a0중</b> · " : ""}${nb(dateText(v.savedAt) + " 저장")} · ${nb(sizeText(v.size))}</span></span></button>
+      <span class="vi-meta">${on ? "<b>사용\u00a0중</b> · " : ""}${v.files && v.files.length > 1 ? nb(`파일 ${v.files.length}개`) + " · " : ""}${nb(dateText(v.savedAt) + " 저장")} · ${nb(sizeText(v.size))}</span></span></button>
     <button type="button" class="icon" data-act="rename" aria-label="${esc(v.name)} 이름 바꾸기" title="이름 바꾸기">${PEN}</button>
     <button type="button" class="icon del" data-act="delete" aria-label="${esc(v.name)} 지우기" title="지우기">${BIN}</button></li>`;
 }
@@ -548,9 +600,12 @@ $("save-template").addEventListener("click", async () => {
     vault.items = await store.list(); // 다른 창에서 같은 양식을 저장했을 수도 있다
     let rec = savedNow();
     if (!rec) {
-      const buf = await t.file.arrayBuffer();
-      rec = await store.add({ name: uniqueName(t.name.replace(/\.hwpx$/i, "")), fileName: t.name, size: buf.byteLength,
-        hash: t.hash, savedAt: Date.now() }, buf);
+      const bufs = [];
+      for (const f of t.files) bufs.push(await f.arrayBuffer());
+      // 파일 하나는 예전처럼 ArrayBuffer 하나로, 여러 개(묶음)는 배열로 보관한다
+      rec = await store.add({ name: uniqueName(t.name), fileName: t.files[0].name,
+        files: t.files.map((f) => ({ name: f.name, size: f.size })), size: bufs.reduce((n, b) => n + b.byteLength, 0),
+        hash: t.hash, savedAt: Date.now() }, bufs.length === 1 ? bufs[0] : bufs);
       vault.items.push(rec);
       keepStorage();
       announce();
@@ -578,7 +633,9 @@ async function useSaved(v) {
   try {
     const buf = await store.file(v.id);
     if (!buf) throw new Error("저장된 파일을 찾지 못했습니다. 목록에서 지우고 양식을 다시 저장해 주세요.");
-    await takeFile("template", new File([buf], v.fileName), v);
+    const bufs = Array.isArray(buf) ? buf : [buf];
+    const names = v.files ? v.files.map((f) => f.name) : [v.fileName];
+    await takeFile("template", bufs.map((b, i) => new File([b], names[i] || `양식${i + 1}.hwpx`)), v);
   } catch (err) {
     showError("template-error", String(err.message || err));
   }
