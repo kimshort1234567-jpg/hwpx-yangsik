@@ -94,15 +94,55 @@ HEADING_ROLES = ("1수준", "2수준", "3수준", "4수준", "5수준")
 TEMPLATE_NUM = {1: "1.", 2: "(1)", 3: "1)", 4: "가.", 5: "(가)"}
 TYPED_CAP = re.compile(r"^\s*<\s*(그림|표)\s*(\d+)?\s*(?:-\s*(\d+)\s*)?>\s*")  # 글자로 친 캡션 번호('<표 1-2>'·'<표 1>'·'< 표 >')
 CONT_WORD = re.compile(r"[(（]\s*계\s*속\s*[)）]")  # 이어지는 표·그림의 제목('… (계속)') — 번호를 늘리지 않는다
-TYPED_HEAD = re.compile(r"^\s*(?:\(\d+\)|\d+\)|\d+\.|\([가-힣]\)|[가-힣]\)|[①-⑳]|[○●◦□■◇◆▶▷►•·ㅇ])\s*")  # 제목으로 정한 문단의 친 번호·기호
+TYPED_HEAD = re.compile(r"^\s*(?:\(\d+\)|\d+\)|\d+\.|\([가-힣]\)|[가-힣]\)|[①-⑳]|[Ⅰ-Ⅻ]\.|제\s*\d+\s*절|"
+                        r"[○●◦□■◇◆▶▷►•·ㅇ])\s*")  # 제목으로 정한 문단의 친 번호·기호
 TYPED_CHAPTER = re.compile(r"^\s*제\s*(\d+)\s*장\s*")  # 글자로 친 장 번호(번호 모양 없는 개요 1수준 문단)
 HEADER_SEP = re.compile(r"\t|\s*\|\s*")  # 머리말 '사업명 | 장 제목'의 구분(탭 또는 세로줄)
-TYPED = [  # 글자로 친 번호·기호(분석용)
+TYPED = [  # 글자로 친 번호·기호(분석용). 여러 단 번호('2-1)'·'1.1')는 multi_prefix가 먼저 본다
     (r"^\(\d+\)\s", "(1)"), (r"^\d+\)\s", "1)"), (r"^\d+\.\s", "1."), (r"^\([가-힣]\)\s", "(가)"),
-    (r"^[가-힣]\)\s", "가)"), (r"^[가-힣]\.\s", "가."), (r"^[①-⑳]", "①"), (r"^※", "※"),
+    (r"^[가-힣]\)\s", "가)"), (r"^[가-힣]\.\s", "가."), (r"^[①-⑳]", "①"), (r"^[Ⅰ-Ⅻ]\.\s?", "Ⅰ."),
+    (r"^제\s*\d+\s*절\s", "제1절"), (r"^※", "※"),
     (r"^[-–—]\s?", "-"), (r"^[○●◦]\s?", "○"), (r"^[□■]\s?", "□"), (r"^[◇◆]\s?", "◇"),
     (r"^[▶▷►]\s?", "▶"), (r"^[•·]\s?", "·"), (r"^ㅇ\s", "ㅇ"),
 ]
+ROMAN = "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ"
+# 여러 단으로 된 제목 번호('2-1)'·'1-7.'·'1.1'·'1.1.1.'·'Ⅱ-1.') — 앞 단은 윗제목의 번호, 마지막 단이 이 제목의 번호.
+# 한 단은 숫자 두 자리까지('2026.11.10' 같은 날짜는 번호가 아님). 2026-11-11 사용자: '2-1)'도 하위 제목 → 양식 번호로
+MULTI_NUM = re.compile(rf"(?:\d{{1,2}}|[{ROMAN}])(?P<sep>[-.])\d{{1,2}}(?:(?P=sep)\d{{1,2}}){{0,2}}(?P<close>[.)]?)")
+MULTI_SHAPE = re.compile(r"[1Ⅰ](?P<sep>[-.])1(?:(?P=sep)1){0,2}[.)]?")
+
+
+def multi_prefix(text: str):
+    """여러 단 번호로 시작하면 (모양, 친 글자(뒤 빈칸까지)). 모양은 숫자를 1로·로마 숫자를 Ⅰ로 바꾼 것('2-1)'→'1-1)').
+    닫는 기호(')'·'.')가 없으면 뒤에 빈칸이 있어야 번호로 본다('1.5배'·'3.14%'는 번호가 아님). 아니면 None."""
+    m = MULTI_NUM.match(text)
+    if not m:
+        return None
+    rest = text[m.end():]
+    if (m.group("close") and rest[:1].isdigit()) or (not m.group("close") and not rest[:1].isspace()):
+        return None
+    shape = re.sub(r"\d+", "1", re.sub(f"[{ROMAN}]", "Ⅰ", m.group(0)))
+    return shape, text[:m.end() + len(rest) - len(rest.lstrip())]
+
+
+def multi_parts(s: str):
+    """여러 단 번호 글자 → 단마다 값('2-1)'→[2, 1], 'Ⅱ-3.'→[2, 3]). 여러 단 번호가 아니면 None."""
+    mp = multi_prefix((s or "").strip() + " ")
+    if not mp:
+        return None
+    core = mp[1].strip().rstrip(".)")
+    return [ROMAN.index(c) + 1 if c in ROMAN else int(c) for c in re.split(r"[-.]", core)]
+
+
+def multi_parent_shape(shape: str):
+    """여러 단 번호 모양의 윗단 모양('1-1)'→'1)', '1-1-1)'→'1-1)', '1.1'·'1.1.'·'1-1.'→'1.', 'Ⅰ-1.'→'Ⅰ.'). 아니면 None."""
+    if not MULTI_SHAPE.fullmatch(shape):
+        return None
+    close = shape[-1] if shape[-1] in ".)" else ""
+    core = shape[:-1] if close else shape
+    parts = core.split("-" if "-" in core else ".")
+    sep = "-" if "-" in core else "."
+    return sep.join(parts[:-1]) + close if len(parts) > 2 else parts[0] + (close or ".")
 SYMBOL_ROLE = {"※": "본문", "-": "본문"}  # 양식에 없는 기호 문단 → 바탕글과 같게(체크포인트 1·2 결정)
 ALIGN = {"JUSTIFY": "양쪽", "LEFT": "왼쪽", "RIGHT": "오른쪽", "CENTER": "가운데", "DISTRIBUTE": "배분",
          "DISTRIBUTE_SPACE": "나눔"}
@@ -658,11 +698,24 @@ def table_info(o):
 
 
 def typed_prefix(text: str):
+    mp = multi_prefix(text)
+    if mp:
+        return mp
     for pat, name in TYPED:
         m = re.match(pat, text)
         if m:
             return name, m.group(0)
     return None
+
+
+def typed_head(raw: str) -> str:
+    """제목으로 정한 문단 맨 앞의 친 번호·기호(앞뒤 빈칸 포함) — 양식 자동 번호와 겹쳐 지울 글자. 없으면 앞 빈칸만."""
+    ws = len(raw) - len(raw.lstrip())
+    mp = multi_prefix(raw[ws:])
+    if mp:
+        return raw[:ws] + mp[1]
+    m = TYPED_HEAD.match(raw)
+    return m.group(0) if m else raw[:ws]
 
 
 def emphasis(desc: Desc, p):
@@ -795,8 +848,11 @@ def cmd_analyze(R: Run):
             if r["역할"] in HEADING_ROLES + ("장 제목",) and "지울번호" not in j:
                 # 사람이 제목으로 정한 문단: 글자로 친 번호·기호('1. '·'8.'·' ○ ')나 앞 공백은 지우고 양식 자동 번호로
                 raw = own_text(p)
-                m = TYPED_HEAD.match(raw) if r["역할"] != "장 제목" else TYPED_CHAPTER.match(raw)
-                pre = m.group(0) if m else raw[:len(raw) - len(raw.lstrip())]
+                if r["역할"] != "장 제목":
+                    pre = typed_head(raw)
+                else:
+                    m = TYPED_CHAPTER.match(raw)
+                    pre = m.group(0) if m else raw[:len(raw) - len(raw.lstrip())]
                 if pre:
                     r["지울번호"] = pre
         rows.append(r)
@@ -2581,8 +2637,13 @@ def build_object(ctx: Ctx, sec, r, kind, chap, counts=None):
 
 
 def typed_value(s: str):
-    """직접 친 번호 글자의 값('3.'→3, '(2)'→2, '다.'→3, '③'→3). 모르면 None."""
+    """직접 친 번호 글자의 값('3.'→3, '(2)'→2, '다.'→3, '③'→3, 'Ⅲ.'→3, 여러 단 '2-1)'→1(마지막 단)). 모르면 None."""
     s = (s or "").strip()
+    parts = multi_parts(s)
+    if parts:
+        return parts[-1]
+    if s and s[0] in ROMAN:
+        return ROMAN.index(s[0]) + 1
     m = re.search(r"\d+", s)
     if m:
         return int(m.group())

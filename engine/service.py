@@ -273,10 +273,12 @@ def auto_judge(rows, paras, desc, prof) -> tuple:
                 J[r["문단"]] = {"역할": "장 제목", "번호": f"제{chap_n}장", "근거": "자동: 개요 1수준 큰 제목 → 장 제목(장 번호 자동)"}
             else:
                 J[r["문단"]] = {"역할": "1수준", "근거": "자동: 개요 1수준 큰 제목 → 양식에 장이 없어 1수준"}
-    # 글자로 친 번호·기호 제목: 짧고 문장이 아닌 줄만 제목, 기호 종류가 처음 나온 순서로 단계
+    # 글자로 친 번호·기호 제목: 짧고 문장이 아닌 줄만 제목, 기호 종류가 처음 나온 순서로 단계.
+    # 여러 단 번호('2-1)'·'1.1')는 윗단 모양('1)'·'1.')보다 한 단계 아래 — 2026-11-11 사용자: '2-1)'은 하위 제목이니
+    # 양식 번호('1)')로 깔끔하게. 개요 번호 제목이 있는 원고에서는 여러 단 번호만, 윗제목 번호와 맞을 때 그 아래 단계로
     auto_levels = sorted({r["수준"] for r in rows if r["역할"].endswith("수준") and r.get("수준") is not None
                           and r["역할"] != "[판단 필요]"})
-    order, cands = [], []
+    cands, multi = [], {}
     for r in rows:
         if r["역할"] != "[판단 필요]" or "직접 친 기호/번호" not in r.get("근거", ""):
             continue
@@ -284,20 +286,78 @@ def auto_judge(rows, paras, desc, prof) -> tuple:
         tp_ = ft.typed_prefix(t.strip())
         name = tp_[0] if tp_ else None
         body = t.strip()[len(tp_[1]):] if tp_ else t.strip()
-        if name and len(body) <= 50 and not SENTENCE_END.search(body) and not auto_levels:
-            if name not in order:
-                order.append(name)
-            cands.append((r, name, t))
+        short = bool(name) and len(body) <= 50 and not SENTENCE_END.search(body)
+        if short and not auto_levels:
+            cands.append((r, name, tp_[1]))
+        elif short and ft.multi_parent_shape(name):
+            multi[r["문단"]] = (name, tp_[1])
         else:
             J[r["문단"]] = {"역할": "본문", "근거": "자동: 번호·기호로 시작하는 문장 → 본문(기호 그대로)"}
-    for r, name, t in cands:
+    # 닫는 기호 없는 여러 단 번호('1.1'·'10-20')는 숫자 범위·소수·날짜일 수 있어, 윗단 모양 제목이 있으면 그 번호와 맞을 때만
+    # ('1.' 3 아래 '3.2'), 윗단 모양이 없으면 두 번 넘게 나올 때만 제목
+    seen = {name for _, name, _ in cands}
+    count = {name: sum(1 for _, n, _ in cands if n == name) for name in seen}
+    last, keep = {}, []
+    for r, name, pre in cands:
+        par = ft.multi_parent_shape(name)
+        if par and name[-1] not in ".)":
+            if not (last.get(par) == ft.multi_parts(pre)[-2] if par in seen else count[name] >= 2):
+                J[r["문단"]] = {"역할": "본문", "근거": f"자동: '{pre.strip()}'은 윗제목 번호와 맞지 않는 숫자 → 본문(글자 그대로)"}
+                continue
+        last[name] = ft.typed_value(pre)
+        keep.append((r, name, pre))
+    cands, order, example = keep, [], {}
+    for r, name, pre in cands:
+        if name not in order:
+            order.append(name)
+            example[name] = pre.strip()
+    moved = True  # 여러 단 번호가 윗단 모양보다 먼저 나왔어도('1-1)' 다음에 '2)') 윗단 바로 아래 단계로
+    while moved:
+        moved = False
+        for name in list(order):
+            par = ft.multi_parent_shape(name)
+            if par in order and order.index(par) > order.index(name):
+                order.remove(name)
+                order.insert(order.index(par) + 1, name)
+                moved = True
+    for r, name, pre in cands:
         lv = order.index(name) + 1
         if lv <= 5:
-            J[r["문단"]] = {"역할": f"{lv}수준", "근거": f"자동: 글자로 친 '{name}' 제목 → {lv}수준(처음 나온 순서)"}
+            J[r["문단"]] = {"역할": f"{lv}수준", "근거": f"자동: 글자로 친 '{example[name]}' 꼴 제목 → {lv}수준"
+                                                     + ("(윗단 번호 아래)" if ft.multi_parent_shape(name) in order else "(처음 나온 순서)")}
         else:
             J[r["문단"]] = {"역할": "본문", "근거": "자동: 제목 단계가 5단계를 넘어 본문"}
     if cands:
-        notes.append("글자로 친 번호·기호 제목을 단계로: " + " → ".join(f"'{n}'" for n in order[:5]))
+        tnum = {h.get("단계"): h.get("번호", "") for h in (prof.get("요약") or {}).get("제목 단계") or []}
+        notes.append("글자로 친 제목 번호를 양식 제목 단계로: " + ", ".join(
+            f"'{example[n]}' → " + (f"'{tnum[i + 1]}'" if tnum.get(i + 1) else f"{i + 1}단계") for i, n in enumerate(order[:5])))
+    if multi:  # 개요 번호 제목 + 글자로 친 여러 단 번호('2.'(개요) 아래 '2-1)'): 윗제목 번호가 맞으면 그 다음 단계
+        rank = {x: i + 1 for i, x in enumerate(auto_levels)}
+        open_, shown, shape_lv = [], [], {}  # 열려 있는 제목들 (번호 값, 단계), 모양마다 처음 정한 단계
+        for r in rows:
+            if r["역할"] == "장 제목":
+                open_ = [(ft.typed_value(r.get("번호")), 0)]
+            elif r["역할"].endswith("수준") and r.get("수준") in rank and r["문단"] not in J:
+                lv = rank[r["수준"]]
+                open_ = [x for x in open_ if x[1] < lv] + [(ft.typed_value(r.get("번호")), lv)]
+            elif r["문단"] in multi:
+                name, pre = multi[r["문단"]]
+                want = ft.multi_parts(pre)[-2]
+                par = next((x for x in reversed(open_) if x[0] == want), None)
+                lv, why = (par[1] + 1, f"윗제목 번호 {want} 아래") if par else (None, "")
+                if lv is None and name[-1] in ".)" and (name in shape_lv or open_):  # 닫는 기호가 있으면 번호가 어긋나도 제목
+                    lv, why = (shape_lv[name], "같은 꼴 제목과 같은 단계(윗번호는 다름)") if name in shape_lv else \
+                        (open_[-1][1] + 1, "바로 앞 제목 아래(윗번호는 다름)")
+                if lv is None or lv > 5:
+                    J[r["문단"]] = {"역할": "본문", "근거": f"자동: 글자로 친 '{pre.strip()}'의 윗번호와 맞는 제목이 없음 → 본문(번호 그대로)"}
+                    continue
+                shape_lv.setdefault(name, lv)
+                J[r["문단"]] = {"역할": f"{lv}수준", "근거": f"자동: 글자로 친 '{pre.strip()}' → {why} {lv}수준"}
+                open_ = [x for x in open_ if x[1] < lv] + [(ft.multi_parts(pre)[-1], lv)]
+                if pre.strip() not in shown:
+                    shown.append(pre.strip())
+        if shown:
+            notes.append("개요 번호 제목 아래 글자로 친 여러 단 번호를 하위 제목으로: " + ", ".join(f"'{s}'" for s in shown[:5]))
     # 번호 뒤 빈칸 없는 '8.속초' 같은 줄: 같은 기호 종류 제목이 있으면 그 단계
     if "1." in order:
         lv = order.index("1.") + 1
@@ -498,6 +558,10 @@ def convert(work, options: dict) -> dict:
         check_note = [f"자동 검사를 끝내지 못했습니다({type(e).__name__}) — 결과 파일은 만들었으니 한글에서 열어 확인해 주세요."]
     log = R.f("적용로그.md").read_text(encoding="utf-8")
     warns = check_note + [re.sub(r"^⚠\s*(p\d+(>\S+)?\s+)?", "", x[2:].strip()) for x in log.splitlines() if x.startswith("- ⚠")]
+    seen = {}  # 같은 알림이 여러 문단에서 나오면 한 줄로('… (4곳)') — 이어지는 표('(계속)')마다 같은 번호 알림이 되풀이됨
+    for w in warns:
+        seen[w] = seen.get(w, 0) + 1
+    warns = [w + (f" ({n}곳)" if n > 1 else "") for w, n in seen.items()]
     made = json.loads(R.f("결과구성.json").read_text(encoding="utf-8"))
     ap = json.loads(R.f("승인변경.json").read_text(encoding="utf-8"))
     split = json.loads(R.f("표나눔.json").read_text(encoding="utf-8"))
