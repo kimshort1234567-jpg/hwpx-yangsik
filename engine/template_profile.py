@@ -29,6 +29,7 @@ PAREN = re.compile(r"^[(<〈\[【-].*[)>〉\]】-]?$")
 CAP_TBL = re.compile(r"^\s*[<〈\[(【]?\s*표\s*\d")
 CAP_FIG = re.compile(r"^\s*[<〈\[(【]?\s*(그림|사진)\s*\d")
 CHAPTER = re.compile(r"^\s*제\s*\d+\s*장")
+CONT_CAP = re.compile(r"^\s*[<〈\[【(]?\s*(표|그림|사진)\s*[\d\s\-–.]*[(（]\s*계\s*속\s*[)）]")  # '<표 7-2(계속)> 표제목'
 
 
 def squeeze(s: str) -> str:
@@ -196,6 +197,26 @@ def body_roles(desc: Desc, rows):
         if c["역할"] in ("본문", "[판단 필요]") and CHAPTER.match(r["text"]) and len(r["text"].strip()) <= 40:
             c = {**c, "역할": "장 제목", "번호방식": "글자", "근거": "글자로 친 '제N장'"}
         cls.append(c)
+
+    def sep_kind(c):
+        """따로 떨어진 표·그림 제목(캡션) 문단의 종류 — 개체에 붙은 캡션이 아니라 개체 위·아래에 따로 놓인 문단."""
+        m = re.match(r"(표|그림) 캡션\(따로", c["역할"])
+        return m.group(1) if m else None
+    for k, c in enumerate(cls):  # 그림 제목 문단 옆의 글자 없는 표 = 빈 그림 틀(양식의 그림 자리)
+        if sep_kind(c) != "그림":
+            continue
+        for j in (k - 1, k + 1):
+            if 0 <= j < len(cls) and cls[j]["역할"] == "표 문단":
+                tbl = next(o for o in ft.objects(rows[j]["p"]) if ft.local(o) == "tbl")
+                if not ft.tf.has_text(tbl):
+                    cls[j] = {**cls[j], "역할": "그림 문단", "근거": cls[j]["근거"] + " → 옆 문단이 그림 제목이라 빈 그림 틀"}
+
+    def sep_near(kind, k):
+        """개체 문단 k 바로 앞·뒤의 따로 떨어진 제목 문단 → (문단 번호, '위'/'아래'). 표는 위부터, 그림은 아래부터 본다."""
+        for j in ((k - 1, k + 1) if kind == "표" else (k + 1, k - 1)):
+            if 0 <= j < len(cls) and sep_kind(cls[j]) == kind:
+                return j, ("위" if j < k else "아래")
+        return None
     R = {"첫 문단": "p0"}
     T, notes, levels = {}, [], {}
     chap = next((k for k, c in enumerate(cls) if c["역할"] == "장 제목"), None)
@@ -223,15 +244,35 @@ def body_roles(desc: Desc, rows):
         tbl = next(o for o in ft.objects(rows[k]["p"]) if ft.local(o) == "tbl")
         cells = ft.direct_cells(tbl)
         merged = sum(1 for tc in cells if ft.cell_addr(tc)[2] > 1 or ft.cell_addr(tc)[3] > 1)
-        has_cap = bool((cls[k].get("캡션") or {}).get("글자"))
+        has_cap = bool((cls[k].get("캡션") or {}).get("글자")) or sep_near(kind, k) is not None
         if kind == "표":
             ok = int(tbl.get("rowCnt")) >= 3 and int(tbl.get("colCnt")) >= 2
             return (not has_cap, not ok, merged, k)
         return (not has_cap, len(cells) != 1, k)
     for kind in ("표", "그림"):
         ks = [k for k, c in enumerate(cls) if c["역할"] == f"{kind} 문단"]
-        if ks:
-            T[kind] = f"p{min(ks, key=lambda k: obj_key(kind, k))}"
+        if not ks:
+            continue
+        e = min(ks, key=lambda k: obj_key(kind, k))
+        T[kind] = f"p{e}"
+        if (cls[e].get("캡션") or {}).get("글자"):
+            continue  # 개체에 붙은 캡션(예전 방식) — 아래는 제목을 따로 문단으로 쓰는 양식만
+        near = sep_near(kind, e)
+        seps = [k for k, c in enumerate(cls) if sep_kind(c) == kind]
+        if near is None and seps:  # 예시 개체 옆에는 없지만 양식 안에 제목 문단이 있음 → 첫 것, 위치는 관례
+            near = (seps[0], "위" if kind == "표" else "아래")
+            notes.append(f"{kind} 제목 문단이 예시 {kind} 바로 옆에 없어 {('위' if kind == '표' else '아래')}에 둠(관례)")
+        if near is not None:
+            T[f"{kind} 캡션"], T[f"{kind} 캡션 위치"] = f"p{near[0]}", near[1]
+            for k, r in enumerate(rows):  # '(계속)' 제목 문단(번호를 늘리지 않는 이어지는 표·그림의 제목)
+                st = desc.styles.get(r["p"].get("styleIDRef"))
+                name = (st.get("name") or "") if st is not None else ""
+                m = CONT_CAP.match(r["text"])
+                kk = ("그림" if m.group(1) in ("그림", "사진") else "표") if m else \
+                    (("그림" if "그림" in name else "표" if "표" in name else None) if "계속" in name else None)
+                if kk == kind and k != near[0]:
+                    T[f"{kind} 계속"] = f"p{k}"
+                    break
     if "장 제목" not in T and R.get("본문"):  # 번호 없는 큰 제목(문서 제목) → 장 제목 모양으로(장 번호는 글자로)
         body_pt = pt(desc, text_run_cid(rows[int(R["본문"][1:])]["p"]))
         for k, c in enumerate(cls[:6]):
@@ -274,6 +315,12 @@ def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None):
         if ref:
             cap = t_cls[int(ref[1:])].get("캡션") or {}
             caps[kind] = {"캡션": (cap.get("번호", "") + " " + (cap.get("글자") or "")).strip(), "위치": cap.get("위치") or "없음"}
+            if T.get(f"{kind} 캡션"):  # 제목을 개체 위·아래에 따로 문단으로 두는 양식
+                sr = t_rows[int(T[f"{kind} 캡션"][1:])]
+                shown = ft.number_all(t_desc, sr["sec"]).get(f"p{sr['i']}") or (t_cls[int(T[f"{kind} 캡션"][1:])].get("번호") or "")
+                caps[kind] = {"캡션": f"{shown} {sr['text'].strip()[:40]}".strip(),
+                              "위치": f"{T[f'{kind} 캡션 위치']}(따로 문단)",
+                              **({"계속": t_rows[int(T[f'{kind} 계속'][1:])]["text"].strip()[:40]} if T.get(f"{kind} 계속") else {})}
     hf = {}
     if T.get("머리말꼬리말"):
         p = t_rows[int(T["머리말꼬리말"][1:])]["p"]
@@ -281,6 +328,12 @@ def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None):
             el = p.find(f".//{q('hp:' + tag)}")
             if el is not None:
                 hf[name] = " ".join(own_text(x) for x in el.iter(q("hp:p"))).replace("\t", " ⇥ ").strip()
+        hdrs = list(p.iter(q("hp:header")))
+        if hdrs:  # 쪽 종류별 머리말(설문 '양식에 있는 머리말 그대로'의 미리 보기)
+            side = {"BOTH": "모든 쪽", "EVEN": "짝수 쪽", "ODD": "홀수 쪽"}
+            hf["머리말 쪽"] = [{"쪽": side.get(h.get("applyPageType"), h.get("applyPageType") or ""),
+                              "글자": " ".join(own_text(x) for x in h.iter(q("hp:p"))).replace("\t", " ⇥ ").strip()}
+                             for h in hdrs]
     pn = None
     if T.get("쪽번호"):
         el = t_rows[int(T["쪽번호"][1:])]["p"].find(f".//{q('hp:pageNum')}")

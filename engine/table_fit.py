@@ -296,7 +296,8 @@ class Metrics:
             for tc in tr.findall(_q(HP, "tc")):
                 a, s = tc.find(_q(HP, "cellAddr")), tc.find(_q(HP, "cellSpan"))
                 r, rs = int(a.get("rowAddr")), int(s.get("rowSpan"))
-                need = max(self.cell_height(tc, tbl), int(tc.find(_q(HP, "cellSz")).get("height")))
+                # 적힌 높이는 부호 있는 값으로(파일에 음수가 '4294966014'처럼 적힌 셀이 있다 — 2026-11-10 사용자 원고)
+                need = max(self.cell_height(tc, tbl), max(0, _s32(tc.find(_q(HP, "cellSz")).get("height"))))
                 if rs == 1:
                     rows[r] = max(rows[r], need)
                 else:
@@ -338,8 +339,8 @@ class Metrics:
 def obj_box(el, metrics=None):
     """개체가 차지하는 (너비, 높이) — 바깥 여백 포함. 표는 어림한 높이와 적힌 높이 중 큰 것."""
     sz = el.find(_q(HP, "sz"))
-    w = int(sz.get("width")) if sz is not None else 0
-    h = int(sz.get("height")) if sz is not None else 0
+    w = max(0, _s32(sz.get("width"))) if sz is not None else 0
+    h = max(0, _s32(sz.get("height"))) if sz is not None else 0
     om = el.find(_q(HP, "outMargin"))
     ml = int(om.get("left", "0")) + int(om.get("right", "0")) if om is not None else 0
     mt = int(om.get("top", "0")) + int(om.get("bottom", "0")) if om is not None else 0

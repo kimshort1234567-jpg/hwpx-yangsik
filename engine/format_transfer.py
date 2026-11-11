@@ -93,6 +93,7 @@ OBJ = ("tbl", "pic", "container", "rect", "ellipse", "line", "arc", "polygon", "
 HEADING_ROLES = ("1수준", "2수준", "3수준", "4수준", "5수준")
 TEMPLATE_NUM = {1: "1.", 2: "(1)", 3: "1)", 4: "가.", 5: "(가)"}
 TYPED_CAP = re.compile(r"^\s*<\s*(그림|표)\s*(\d+)?\s*(?:-\s*(\d+)\s*)?>\s*")  # 글자로 친 캡션 번호('<표 1-2>'·'<표 1>'·'< 표 >')
+CONT_WORD = re.compile(r"[(（]\s*계\s*속\s*[)）]")  # 이어지는 표·그림의 제목('… (계속)') — 번호를 늘리지 않는다
 TYPED_HEAD = re.compile(r"^\s*(?:\(\d+\)|\d+\)|\d+\.|\([가-힣]\)|[가-힣]\)|[①-⑳]|[○●◦□■◇◆▶▷►•·ㅇ])\s*")  # 제목으로 정한 문단의 친 번호·기호
 TYPED_CHAPTER = re.compile(r"^\s*제\s*(\d+)\s*장\s*")  # 글자로 친 장 번호(번호 모양 없는 개요 1수준 문단)
 HEADER_SEP = re.compile(r"\t|\s*\|\s*")  # 머리말 '사업명 | 장 제목'의 구분(탭 또는 세로줄)
@@ -109,6 +110,15 @@ LS_TYPE = {"PERCENT": "글자에 따라", "FIXED": "고정 값", "BETWEEN_LINES"
 SAMPLE = {"DIGIT": "1", "HANGUL_SYLLABLE": "가", "CIRCLED_DIGIT": "①", "CIRCLED_HANGUL_SYLLABLE": "㉮",
           "ROMAN_SMALL": "i", "ROMAN_CAPITAL": "I", "LATIN_SMALL": "a", "LATIN_CAPITAL": "A"}
 MM = 283.465
+
+
+NOW = {}  # 지금 하는 일(오류가 나면 service가 '어디서'를 알려 주는 데 쓴다) — step()으로 바꾼다
+
+
+def step(work: str, **where):
+    """지금 하는 일 기록: 작업 이름(본문·표지·차례·쪽 번호·저장 …)과 원고 문단(본문일 때)."""
+    NOW.clear()
+    NOW.update({"작업": work, **where})
 
 
 def q(tag: str) -> str:
@@ -1157,6 +1167,7 @@ class Ctx:
         self.styled_tbls = []  # 양식 표 모양을 입힌 표(머리행을 제목 셀로 반복해도 되는 표)
         self.frame_tbls = []   # 양식 그림 틀을 입힌 표(사진 묶음 등)
         self.big_tables = []   # 쪽보다 길 수 있어 쪽 경계에서 나뉘게 한 표(secure_tables)
+        self.tbl_names = []    # (표, 제목 글자) — 제목을 따로 문단으로 둔 표도 알림에 제목으로 부르게
         self.hf_id = 0
         self.ms_color = {c.get("id"): (c.get("textColor") or "").upper() for c in self.msp.items("charPr").values()}
         self.colored = Counter()
@@ -1211,6 +1222,24 @@ class Ctx:
     def tmpl_tbl(self, kind):
         p = self.tg_para(kind)
         return p.find(f".//{q('hp:tbl')}") if p is not None else None
+
+    def cap_mode(self, kind):
+        """양식의 표·그림 제목 방식: '붙음'(개체 캡션) / '문단'(개체 위·아래 따로 문단) / None(제목 모양 없음)."""
+        return tmpl_caption(self.R["표그림"], self.tgp, kind)[0]
+
+    def cap_pos(self, kind) -> str:
+        """따로 문단 제목의 자리: 양식에서 찾은 '위'·'아래'(못 찾았으면 표 위·그림 아래)."""
+        return self.R["표그림"].get(f"{kind} 캡션 위치") or ("위" if kind == "표" else "아래")
+
+    def cap_numbered(self, kind) -> bool:
+        """양식 제목에 자동 번호가 있는가 — 없으면 원고에 친 번호를 지우지 않는다(번호가 사라지지 않게)."""
+        head = caption_head(self, kind)
+        if head is None:
+            return False
+        if is_inline(head):
+            return True
+        hd = self.tg.items["paraPr"][head.get("paraPrIDRef")].find(q("hh:heading"))
+        return hd is not None and hd.get("type") in ("NUMBER", "OUTLINE")
 
 
 # --- 앞표지
@@ -1464,21 +1493,95 @@ def set_header_slots(ctx: Ctx, truns, tab, left: str, right: str):
     ctx.log.append(f"머리말 글자(설문): '{old}' → '{new}'")
 
 
-def make_hf(ctx: Ctx, kind, ms_hdr, label_title):
-    """양식 머리말·꼬리말 사본(머리말 글자는 결정대로). 양식에 없거나 결정 '머리말 만들기'가 false면 None."""
+CHAPTER_HEAD = re.compile(r"^\s*(제\s*\d+\s*장|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]\s*[.\s])")  # 머리말의 장 제목 칸('제7장 …'·'Ⅶ. …')
+
+
+def header_text_runs(hdr):
+    """머리말 첫 문단의 글자 칸(run)과 탭 — put_header_text·template_header가 같이 쓴다."""
+    tp0 = hdr.find(q("hp:subList")).findall(q("hp:p"))[0]
+    truns = [r for r in tp0.findall(q("hp:run")) if r.find(q("hp:t")) is not None]
+    tab = next(iter(truns[0].iter(q("hp:tab"))), None) if truns else None
+    return tp0, truns, tab
+
+
+def is_chapter_text(ctx: Ctx, text: str) -> bool:
+    """양식 머리말 글자가 장 제목인가: '제N장 …'으로 시작하거나 양식 장 제목 글자(뒤의 '(… 20pt)' 같은 설명은 빼고)를 담았다."""
+    if CHAPTER_HEAD.match(text or ""):
+        return True
+    tt = ctx.tg_para("장 제목")
+    core = re.sub(r"\s*\([^)]*\)\s*$", "", own_text(tt)).strip() if tt is not None else ""
+    return len(core) >= 4 and core in (text or "")
+
+
+def template_header(ctx: Ctx, hdr, label_title: str):
+    """결정 '머리말글자' = "양식"(설문 '양식에 있는 머리말 그대로'): 양식 머리말 글자를 그대로 두되 장 제목 칸만 원고 장 제목으로.
+    장 제목 칸 = 두 칸 머리말('사업명 ⇥ 장 제목')의 오른쪽 칸, 또는 글자가 장 제목인 머리말(홀수 쪽 '제7장 …' 등).
+    원고에 장이 없으면(label_title이 빔) 양식 글자 그대로 — 양식이 그 장의 양식이라고 본다."""
+    _, truns, tab = header_text_runs(hdr)
+    old = plain([t for r in truns for t in r.findall(q("hp:t"))])
+    if label_title and truns:
+        if len(truns) >= 2 and tab is not None:  # 두 칸: 왼쪽 '사업명 ⇥', 오른쪽 장 제목
+            slot = truns[-1]
+            for t in slot.findall(q("hp:t")):
+                slot.remove(t)
+            etree.SubElement(slot, q("hp:t")).text = label_title
+        elif tab is not None and is_chapter_text(ctx, tab.tail or ""):  # 한 칸 안에 '사업명 ⇥ 장 제목'
+            tab.tail = label_title
+            for x in list(tab.itersiblings()):  # 장 제목 뒤에 이어진 글자 조각은 뺀다
+                x.getparent().remove(x)
+        elif is_chapter_text(ctx, old):  # 머리말 전체가 장 제목(홀수 쪽 '제7장 …' 등)
+            for r in truns:
+                for t in r.findall(q("hp:t")):
+                    r.remove(t)
+            etree.SubElement(truns[0], q("hp:t")).text = label_title
+    new = plain([t for r in truns for t in r.findall(q("hp:t"))])
+    ctx.log.append(f"머리말 글자(양식 그대로{' — 장 제목 칸은 이 장 제목' if new != old else ''}): '{old}' → '{new}'"
+                   if new != old else f"머리말 글자(양식 그대로): '{old}'")
+
+
+def other_header(ctx: Ctx, hdr, label_title: str):
+    """쪽 종류가 여럿인 양식(짝수·홀수 쪽 머리말이 다름)의 둘째 머리말부터 — '원고'·'지정'일 때 양식 예시 글자가 남지 않게:
+    장 제목 머리말(홀수 쪽 '제7장 …' 등)은 이 장 제목(장이 없으면 정한 머리말 글자), 그 밖은 첫 머리말과 같은 규칙."""
+    _, truns, tab = header_text_runs(hdr)
+    old = plain([t for r in truns for t in r.findall(q("hp:t"))])
+    if truns and len(truns) == 1 and is_chapter_text(ctx, old):
+        text = label_title or (ctx.D.get("머리말 내용", "") if ctx.D.get("머리말글자") == "지정" else "")
+        if text:
+            for t in truns[0].findall(q("hp:t")):
+                truns[0].remove(t)
+            etree.SubElement(truns[0], q("hp:t")).text = text
+            ctx.log.append(f"머리말 글자({hdr.get('applyPageType')} 쪽, 장 제목 칸): '{old}' → '{text}'")
+        return
+    return "그대로"
+
+
+def make_hfs(ctx: Ctx, kind, ms_hdr, label_title) -> list:
+    """양식 머리말·꼬리말 사본들(머리말 글자는 결정대로) — 양식에 쪽 종류(모든 쪽·짝수·홀수)별로 여럿이면 모두.
+    양식에 없거나 결정 '머리말 만들기'가 false면 []."""
     if kind == "header" and not ctx.D.get("머리말 만들기", True):
-        return None
+        return []
     hp = ctx.tg_para("머리말꼬리말")
-    src = hp.find(f".//{q('hp:' + kind)}") if hp is not None else None
-    if src is None:
-        return None
-    el = ctx.tg.copy(src)
-    ctx.hf_id += 1
-    el.set("id", str(ctx.hf_id))
-    strip_layout(el)
-    if kind == "header" and ctx.D.get("머리말글자", "원고") in ("원고", "지정"):
-        put_header_text(ctx, el, ms_hdr, label_title)
-    return el
+    srcs = list(hp.iter(q("hp:" + kind))) if hp is not None else []
+    out = []
+    for n, src in enumerate(srcs):
+        el = ctx.tg.copy(src)
+        ctx.hf_id += 1
+        el.set("id", str(ctx.hf_id))
+        strip_layout(el)
+        how = ctx.D.get("머리말글자", "원고")
+        if kind == "header" and how == "양식":
+            template_header(ctx, el, label_title)
+        elif kind == "header" and how in ("원고", "지정"):
+            if n == 0 or other_header(ctx, el, label_title) == "그대로":
+                put_header_text(ctx, el, ms_hdr, label_title)
+        out.append(el)
+    return out
+
+
+def make_hf(ctx: Ctx, kind, ms_hdr, label_title):
+    """양식 머리말·꼬리말 첫 사본(예전 호출용) — 없으면 None."""
+    els = make_hfs(ctx, kind, ms_hdr, label_title)
+    return els[0] if els else None
 
 
 def build_first_para(ctx: Ctx, title_segs, title_pp, ms_hdr, label_title):
@@ -1507,15 +1610,20 @@ def put_section_ctrls(ctx: Ctx, first, tt, ms_hdr, label_title):
     pn_src = ctx.tg_para("쪽번호") if ctx.R["표그림"].get("쪽번호") else tt
     pn_new = pn_src.find(f".//{q('hp:pageNum')}") if pn_src is not None else None
     run0 = first.findall(q("hp:run"))[0]
-    for kind, new in [("pageNum", ctx.tg.copy(pn_new) if pn_new is not None else None)] + \
-                     [(k, make_hf(ctx, k, ms_hdr, label_title)) for k in ("header", "footer")]:
-        old = first.find(f".//{q('hp:' + kind)}")
-        if old is not None and new is not None:
-            old.getparent().replace(old, new)
-        elif old is not None:  # 양식에 없음 → 첫 문단(양식 본문 첫 문단)에 있던 것도 뺀다
-            ctrl = old.getparent()
-            ctrl.getparent().remove(ctrl) if len(ctrl) == 1 else ctrl.remove(old)
-        elif new is not None:  # 양식에는 있는데 첫 문단에 없음(다른 문단에 있던 것) → 첫 문단에 붙인다
+    for kind, news in [("pageNum", [ctx.tg.copy(pn_new)] if pn_new is not None else [])] + \
+                      [(k, make_hfs(ctx, k, ms_hdr, label_title)) for k in ("header", "footer")]:
+        olds = list(first.iter(q("hp:" + kind)))
+        # 쪽 종류(모든 쪽·짝수·홀수)가 같은 것끼리 바꾼다 — 양식이 짝수·홀수 쪽 머리말을 따로 두면 둘 다
+        for old in olds:
+            new = next((n for n in news if n.get("applyPageType") == old.get("applyPageType")), None) \
+                if len(olds) > 1 or len(news) > 1 else (news[0] if news else None)
+            if new is not None:
+                old.getparent().replace(old, new)
+                news.remove(new)
+            else:  # 양식에 없음 → 첫 문단(양식 본문 첫 문단)에 있던 것도 뺀다
+                ctrl = old.getparent()
+                ctrl.getparent().remove(ctrl) if len(ctrl) == 1 else ctrl.remove(old)
+        for new in news:  # 양식에는 있는데 첫 문단에 없음(다른 문단에 있던 것) → 첫 문단에 붙인다
             etree.SubElement(run0, q("hp:ctrl")).append(new)
 
 
@@ -1595,8 +1703,7 @@ def build_chapter_para(ctx: Ctx, sec, title_segs, title_pp, ms_hdr, label_title)
     run.set("charPrIDRef", ctx.tg.char_pr(text_run_cid(tt)))
     if ms_hdr is not None:
         for kind in ("header", "footer"):
-            el = make_hf(ctx, kind, ms_hdr, label_title)
-            if el is not None:
+            for el in make_hfs(ctx, kind, ms_hdr, label_title):  # 짝수·홀수 쪽 머리말이 따로면 둘 다
                 etree.SubElement(run, q("hp:ctrl")).append(el)
     if ctx.D.get("장마다 쪽 번호 새로", False):
         nn = etree.SubElement(etree.SubElement(run, q("hp:ctrl")), q("hp:newNum"))
@@ -1629,19 +1736,57 @@ class InlineNum:
         return f"{self.before}{fmt_num(n, self.fmt)}{self.after}".strip()
 
 
+class ParaNum:
+    """양식 캡션 번호가 문단 번호일 때 — 번호 정의와 캡션이 쓰는 수준(위성 양식 '<그림 1-^1>'은 1수준,
+    '<표 ^1-^7>'처럼 7수준을 쓰는 양식도 있다). fixed: 다른 수준 자리에 넣을 값(개요 번호 캡션의 장 번호)."""
+
+    def __init__(self, num, lv: int, fixed=None):
+        self.num, self.lv, self.fixed = num, lv, dict(fixed or {})
+
+    def label(self, n: int) -> str:
+        return head_text(self.num, self.lv, {**self.fixed, self.lv: n})
+
+
+def chapter_in_label(text: str, lv: int, chap: int, no_chapters: bool) -> str:
+    """캡션 번호 모양의 장 번호 자리 → 이 장 번호(글자로). 장 번호 자리는 세는 번호(^lv) 바로 앞의 '숫자-' 또는 '^n-'
+    ('<그림 1-^1>' → '<그림 3-^1>', '<표 ^1-^7>' → '<표 3-^7>'). 장 없는 원고는 장 번호 자리를 뺀다('<표 ^7>')."""
+    i = text.find(f"^{lv}")
+    if i < 0:
+        return text
+    m = re.search(r"(\d+|\^\d)(\s*[-–.·]\s*)$", text[:i])
+    if not m:
+        return text
+    return text[:m.start()] + ("" if no_chapters else f"{chap}{m.group(2)}") + text[i:]
+
+
 def cap_label(num, n_chap: int, n_total: int) -> str:
     """캡션 번호 글자: 문단 번호 정의면 장별 번호, 글자 안 자동 번호면 문서 전체 번호."""
     if num is None:
         return ""
     if isinstance(num, InlineNum):
         return num.label(n_total)
+    if isinstance(num, ParaNum):
+        return num.label(n_chap)
     return head_text(num, 1, {1: n_chap})
 
 
-def caption_head(ctx: Ctx, kind: str):
-    tbl = ctx.tmpl_tbl(kind)
+def tmpl_caption(T: dict, tgp, kind: str):
+    """양식 표·그림 제목(캡션) → (방식, 제목 문단): ('붙음', 개체 캡션의 첫 문단) / ('문단', 개체 위·아래에 따로 놓인
+    제목 문단 — template_profile이 찾은 '표 캡션'·'그림 캡션') / (None, None) — 양식에 제목 모양이 없음."""
+    ref = T.get(kind)
+    p = tgp.paras()[int(ref[1:])] if ref else None
+    tbl = p.find(f".//{q('hp:tbl')}") if p is not None else None
     cap = tbl.find(q("hp:caption")) if tbl is not None else None
-    return cap.find(q("hp:subList")).find(q("hp:p")) if cap is not None else None
+    if cap is not None:
+        return "붙음", cap.find(q("hp:subList")).find(q("hp:p"))
+    if T.get(f"{kind} 캡션"):
+        return "문단", tgp.paras()[int(T[f"{kind} 캡션"][1:])]
+    return None, None
+
+
+def caption_head(ctx: Ctx, kind: str):
+    """양식 제목(캡션) 문단 — 개체에 붙은 캡션의 첫 문단 또는 따로 놓인 제목 문단(없으면 None)."""
+    return tmpl_caption(ctx.R["표그림"], ctx.tgp, kind)[1]
 
 
 def is_inline(head) -> bool:
@@ -1685,26 +1830,65 @@ def inline_caption_para(ctx: Ctx, head, segs, kind: str):
 
 
 def chapter_caption_pp(ctx: Ctx, kind: str, chap: int):
-    """장마다 캡션 번호를 따로: '<그림 1-^1>'의 장 번호를 바꾼 번호 정의 + 그것을 쓰는 캡션 문단 모양.
-    양식 캡션이 글자 안 자동 번호면 (None, InlineNum) — 문단 모양은 양식 캡션 그대로."""
+    """장마다 캡션 번호를 따로: 장 번호 자리를 이 장 번호로 바꾼 번호 정의 + 그것을 쓰는 제목(캡션) 문단 모양.
+    돌려주는 값 (결과 문단 모양 ID, 번호):
+      - 문단 번호(NUMBER): (새 문단 모양, ParaNum) — 캡션이 쓰는 수준이 1수준이 아니어도 된다('<표 ^1-^7>' 꼴)
+      - 개요 번호(OUTLINE): (양식 문단 모양 그대로, ParaNum — 장 번호는 결과 개요 번호가 센다)
+      - 글자 안 자동 번호: (None, InlineNum) — 문단 모양은 양식 캡션 그대로
+      - 번호 없음: (양식 문단 모양 그대로, None) — 원고에 친 번호를 그대로 둔다
+      - 양식에 제목 모양이 없음: (None, None)"""
     head = caption_head(ctx, kind)
+    if head is None:
+        return None, None
     if is_inline(head):
         return None, InlineNum(head)
     key = (kind, chap)
     if key not in ctx.cap_pp:
-        cp = ctx.tmpl_tbl(kind).find(q("hp:caption")).find(q("hp:subList")).find(q("hp:p"))
-        base_pid = ctx.tg.para_pr(cp.get("paraPrIDRef"))
+        base_pid = ctx.tg.para_pr(head.get("paraPrIDRef"))
         pp = copy.deepcopy(ctx.dst.get("paraPr", base_pid))
         hd = pp.find(q("hh:heading"))
-        num = copy.deepcopy(ctx.dst.get("numbering", hd.get("idRef")))
-        ph = [x for x in num.findall(q("hh:paraHead")) if x.get("level") == "1"][0]
-        if getattr(ctx, "no_chapters", False):  # 장 없는 원고: '<표 1-^1>' → '<표 ^1>'(없는 장 번호를 찍지 않게)
-            ph.text = re.sub(r"\d+\s*-\s*(\^1)", r"\1", ph.text or "")
+        if hd is None or hd.get("type") not in ("NUMBER", "OUTLINE"):
+            ctx.cap_pp[key] = (base_pid, None)
+        elif hd.get("type") == "OUTLINE":
+            lv = int(hd.get("level")) + 1
+            outline = ctx.dst.get("numbering", ctx.base.sections[0].find(f".//{q('hp:secPr')}").get("outlineShapeIDRef"))
+            ctx.cap_pp[key] = (base_pid, ParaNum(outline, lv, {1: chap}))
         else:
-            ph.text = re.sub(r"\d+(\s*-\s*\^1)", rf"{chap}\1", ph.text or "")
-        hd.set("idRef", ctx.dst.add("numbering", num, dedupe=False))
-        ctx.cap_pp[key] = (ctx.dst.add("paraPr", pp), num)
+            lv = int(hd.get("level")) + 1
+            num = copy.deepcopy(ctx.dst.get("numbering", hd.get("idRef")))
+            ph = next(x for x in num.findall(q("hh:paraHead")) if x.get("level") == str(lv))
+            # 장 없는 원고: '<표 1-^1>' → '<표 ^1>'(없는 장 번호를 찍지 않게)
+            ph.text = chapter_in_label(ph.text or "", lv, chap, getattr(ctx, "no_chapters", False))
+            hd.set("idRef", ctx.dst.add("numbering", num, dedupe=False))
+            ctx.cap_pp[key] = (ctx.dst.add("paraPr", pp), ParaNum(num, lv))
     return ctx.cap_pp[key]
+
+
+def caption_para(ctx: Ctx, kind: str, segs, pp, cont=None):
+    """따로 놓인 제목(캡션) 문단: 양식 제목 문단 모양 + 원고 캡션 글자. pp: 이 장의 번호를 쓰는 문단 모양(결과 ID).
+    cont: 이어지는 표·그림('(계속)')의 번호 글자 — 번호를 늘리지 않게 번호 없는 모양에 번호를 글자로 넣는다
+    (양식에 '(계속)' 제목 문단이 있으면 그 모양)."""
+    head = caption_head(ctx, kind)
+    if cont is not None:
+        t = etree.Element(q("hp:t"))
+        t.text = cont + " "
+        segs = [(None, [t])] + list(segs)
+        ex = ctx.tg_para(f"{kind} 계속")
+        if ex is not None:
+            pid = ctx.tg.para_pr(ex.get("paraPrIDRef"))
+        else:
+            ex = head
+            pid = no_number(ctx, pp or ctx.tg.para_pr(head.get("paraPrIDRef")))
+    elif is_inline(head):
+        return inline_caption_para(ctx, ctx.tg.copy(head), segs, kind)
+    else:
+        ex, pid = head, pp or ctx.tg.para_pr(head.get("paraPrIDRef"))
+    p = etree.Element(q("hp:p"))
+    for k, v in (("id", "0"), ("paraPrIDRef", pid), ("styleIDRef", ctx.tg.style(ex.get("styleIDRef"))), ("pageBreak", "0"),
+                 ("columnBreak", "0"), ("merged", "0")):
+        p.set(k, v)
+    ctx.set_seg_runs(p, ctx.tg.char_pr(text_run_cid(ex)), segs)
+    return p
 
 
 # --- 표 · 그림
@@ -1943,6 +2127,10 @@ def secure_tables(ctx: Ctx, secs):
             info = {"표": table_label(tbl), "종류": "그림" if frame else "표", "높이mm": round(total / MM),
                     "본문높이mm": round(limit / MM), "나누기": tf.PAGE_BREAK_NAME[mode], "전": was, "머리행반복": rep,
                     "알림": note}
+            if tbl.find(q("hp:caption")) is None:  # 제목을 따로 문단으로 둔 표 → 그 제목으로 부른다
+                name = next((t for x, t in ctx.tbl_names if x is tbl and t), "")
+                if name:
+                    info["표"] = name[:24] + ("…" if len(name) > 24 else "")
             ctx.big_tables.append(info)
             ctx.log.append(f"표 '{info['표']}' 쪽에서 차지할 높이 어림 {total / MM:.0f}mm > 본문 높이 {limit / MM:.0f}mm → "
                            f"{was}을 끄고 자리 차지, 쪽 경계에서 '{info['나누기']}'"
@@ -2094,7 +2282,8 @@ def no_number(ctx: Ctx, pid) -> str:
     return ctx.dst.variant("paraPr", pid, fn)
 
 
-def build_caption(ctx: Ctx, tmpl, cap_ps, width, pp, kind="그림"):
+def build_caption(ctx: Ctx, tmpl, cap_ps, width, pp, kind="그림", cont=None):
+    """개체에 붙는 캡션. cont: 이어지는 표·그림('(계속)')의 번호 글자 — 자동 번호 대신 글자로 넣어 번호를 늘리지 않는다."""
     tcap = tmpl.find(q("hp:caption"))
     if tcap is None or not cap_ps:
         return None
@@ -2108,7 +2297,13 @@ def build_caption(ctx: Ctx, tmpl, cap_ps, width, pp, kind="그림"):
     for p in tps:
         sl.remove(p)
     for k, segs in enumerate(cap_ps):
-        if inline:  # 양식 캡션 번호가 글자 안 자동 번호 → 첫 문단에 번호 부분, 둘째부터는 글자만
+        if cont is not None and k == 0:  # 번호를 글자로(번호 없는 모양) — 글자 안 자동 번호도 넣지 않는다
+            t = etree.Element(q("hp:t"))
+            t.text = cont + " "
+            np = ctx.set_seg_runs(copy.deepcopy(head), cid, [(None, [t])] + list(segs))
+            if not inline:
+                np.set("paraPrIDRef", no_number(ctx, pp))
+        elif inline:  # 양식 캡션 번호가 글자 안 자동 번호 → 첫 문단에 번호 부분, 둘째부터는 글자만
             np = inline_caption_para(ctx, head, segs, kind) if k == 0 else ctx.set_seg_runs(copy.deepcopy(head), cid, segs)
         else:
             np = ctx.set_seg_runs(copy.deepcopy(head), cid, segs)
@@ -2121,15 +2316,16 @@ def build_caption(ctx: Ctx, tmpl, cap_ps, width, pp, kind="그림"):
     return cap
 
 
-def set_shell(ctx: Ctx, tbl, tmpl, cap_ps, pp, kind="그림"):
-    """표 개체의 위치·바깥 여백·캡션·안 여백을 양식 것으로(크기·행·셀은 원고 그대로)."""
+def set_shell(ctx: Ctx, tbl, tmpl, cap_ps, pp, kind="그림", cont=None):
+    """표 개체의 위치·바깥 여백·캡션·안 여백을 양식 것으로(크기·행·셀은 원고 그대로).
+    양식 개체에 캡션이 없으면(제목을 따로 문단으로 두는 양식) 캡션을 달지 않는다."""
     for name in ("pos", "outMargin", "caption", "inMargin"):
         old = tbl.find(q("hp:" + name))
         if old is not None:
             tbl.remove(old)
     sz = tbl.find(q("hp:sz"))
     new = [ctx.tg.copy(tmpl.find(q("hp:pos"))), ctx.tg.copy(tmpl.find(q("hp:outMargin")))]
-    cap = build_caption(ctx, tmpl, cap_ps, sz.get("width"), pp, kind)
+    cap = build_caption(ctx, tmpl, cap_ps, sz.get("width"), pp, kind, cont)
     if cap is not None:
         new.append(cap)
     new.append(ctx.tg.copy(tmpl.find(q("hp:inMargin"))))
@@ -2177,9 +2373,9 @@ def object_paragraph(ctx: Ctx, sec, objs, kind="표"):
     return p
 
 
-def caption_ts(ctx: Ctx, r, tbl_src):
+def caption_ts(ctx: Ctx, r, tbl_src, numbered=True, mode="붙음"):
     """캡션 글자(문단마다 text_segs 글자 조각): 개체에 붙은 캡션, 따로 떨어진 캡션 문단, 또는 역할판단의 '캡션바꿈'.
-    승인된 변경(직접 친 번호·앞뒤 공백)을 적용한다."""
+    승인된 변경(직접 친 번호·앞뒤 공백)을 적용한다 — 양식 제목에 자동 번호가 없으면(numbered=False) 친 번호를 그대로 둔다."""
     mp = ctx.msp.paras()
     cap_src = tbl_src.find(q("hp:caption"))
     sep = next((x for x in ctx.roles if x.get("붙일곳") == r["문단"]), None)
@@ -2197,7 +2393,7 @@ def caption_ts(ctx: Ctx, r, tbl_src):
         ps = [caption_segs(allp[j]) for j in (keep if keep is not None else range(len(allp)))]
         if keep is not None and len(keep) < len(allp):
             ctx.log.append(f"{r['문단']} 캡션 칸 문단 {len(allp)}개 중 {len(allp) - len(keep)}개는 본문으로 꺼냄(역할매핑 '꺼냄')")
-        if cap_src.get("side") != "BOTTOM":
+        if cap_src.get("side") != "BOTTOM" and mode == "붙음":
             ctx.log.append(f"{r['문단']} 캡션 위치 {cap_src.get('side')} → BOTTOM")
     elif r.get("캡션추가"):  # 원고에 캡션이 없는 개체 — 사용자가 승인한 캡션 글자를 새로 단다(역할판단 '캡션추가')
         t = etree.Element(q("hp:t"))
@@ -2208,28 +2404,92 @@ def caption_ts(ctx: Ctx, r, tbl_src):
     else:
         ps = []
     ps = [segs for segs in ps if plain(flat(segs)).strip()]
-    if ps:
+    if ps and numbered:
         ps[0] = norm_caption_segs(ctx, r, ps[0])
     return ps
 
 
-def build_object(ctx: Ctx, sec, r, kind, chap):
+def raw_caption(ctx: Ctx, r, tbl_src) -> str:
+    """원고 캡션 글자 그대로(번호 다듬기 없이) — 붙은 캡션(꺼낸 문단 빼고), 없으면 따로 떨어진 캡션 문단."""
+    cap = tbl_src.find(q("hp:caption")) if tbl_src is not None else None
+    if cap is not None:
+        keep = (r.get("캡션") or {}).get("캡션문단")
+        ps = cap.find(q("hp:subList")).findall(q("hp:p"))
+        return " / ".join(s for s in (caption_text(p).strip() for j, p in enumerate(ps) if keep is None or j in keep) if s)
+    sep = next((x for x in ctx.roles if x.get("붙일곳") == r["문단"]), None)
+    return caption_text(ms_para(ctx.msp.paras(), sep["문단"])).strip() if sep else ""
+
+
+def ms_copy(ctx: Ctx, el):
+    """원고 요소를 결과 ID로 옮긴 사본(줄 배치 정보 없이)."""
+    c = ctx.ms.copy(el)
+    strip_layout(c)
+    return c
+
+
+def keep_original(ctx: Ctx, sec, r, src, kind, why):
+    """원고 개체 문단을 원고 모양 그대로(개체·캡션 그대로, 결과 ID로만 옮김) — 양식 모양을 입히지 못할 때.
+    따로 떨어진 원고 캡션 문단도 원래 자리(위·아래)에 그대로 둔다. 캡션 칸에서 본문으로 꺼낸 문단은 캡션에서 뺀다.
+    돌려주는 값: 결과 문단 순서(out_roles를 맞추는 데)."""
+    sep = next((x for x in ctx.roles if x.get("붙일곳") == r["문단"]), None)
+    above = sep is not None and para_key(sep["문단"])[0] < para_key(r["문단"])[0]
+    order = []
+
+    def put_sep():
+        c = ms_copy(ctx, ms_para(ctx.msp.paras(), sep["문단"]))
+        c.set("id", "0")
+        sec.append(c)
+        order.append(("캡션", 0))
+    if sep and above:
+        put_sep()
+    keep = []
+    for o in objects(src):
+        c = ms_copy(ctx, o)
+        cap, out = c.find(q("hp:caption")), (r.get("캡션") or {}).get("꺼낼문단") or []
+        if cap is not None and out and local(c) == "tbl":
+            ps = cap.find(q("hp:subList")).findall(q("hp:p"))
+            for j in sorted(out, reverse=True):
+                ps[j].getparent().remove(ps[j])
+        keep.append(c)
+    object_paragraph(ctx, sec, keep, kind)
+    order.append("개체")
+    if sep and not above:
+        put_sep()
+    ctx.log.append(f"⚠ {r['문단']} {kind} '{raw_caption(ctx, r, next((o for o in objects(src) if local(o) == 'tbl'), None))[:30]}'"
+                   f" — {why} 원고 모양 그대로 둠(한글에서 확인해 주세요)")
+    return order
+
+
+def caption_paras(ctx: Ctx, kind, cap_ps, pp, cont=None) -> list:
+    """따로 놓인 제목 문단들: 첫 문단은 양식 제목(번호) 모양, 둘째부터는 번호 없는 같은 모양."""
+    out = []
+    for k, segs in enumerate(cap_ps):
+        if k == 0:
+            out.append(caption_para(ctx, kind, segs, pp, cont))
+        elif is_inline(caption_head(ctx, kind)):
+            head = ctx.tg.copy(caption_head(ctx, kind))
+            out.append(ctx.set_seg_runs(head, text_run_cid(head), segs))
+        else:
+            out.append(caption_para(ctx, kind, segs, no_number(ctx, pp or ctx.tg.para_pr(caption_head(ctx, kind).get("paraPrIDRef")))))
+    return out
+
+
+def build_object(ctx: Ctx, sec, r, kind, chap, counts=None):
+    """원고 표·그림 문단 → 양식 표 모양·그림 틀 + 양식 제목(캡션).
+    제목은 양식 방식대로: 개체에 붙은 캡션('붙음') 또는 개체 위·아래에 따로 놓인 제목 문단('문단').
+    '(계속)'이 붙은 제목은 앞 표·그림과 같은 번호를 글자로 넣는다(번호를 늘리지 않음 — counts: 이 장에서 센 번호).
+    돌려주는 값 (캡션 글자, 번호, 정보) — 정보 '순서': 결과 문단 순서('개체'·('캡션', k)), '계속': 글자로 넣은 번호,
+    '원고 그대로': 개체·캡션 모두 원고 모양, '원고 캡션': 캡션만 원고 것, '번호 둠': 원고에 친 번호를 지우지 않음."""
     src = ms_para(ctx.msp.paras(), r["문단"])
     objs = objects(src)
     tbl_src = next(o for o in objs if local(o) == "tbl")
     floats = [o for o in objs if o is not tbl_src]
-    cap_ps = caption_ts(ctx, r, tbl_src)
     tmpl = ctx.tmpl_tbl(kind)
     if tmpl is None:  # 양식에 이 종류(표·그림) 예시가 없음 → 원고 개체 모양을 그대로(캡션도 원고 것)
-        keep = [copy.deepcopy(o) for o in objs]
-        for o in keep:
-            ctx.ms.remap(o)
-            strip_layout(o)
-        object_paragraph(ctx, sec, keep, kind)
-        ctx.log.append(f"⚠ {r['문단']} 양식에 {kind} 예시가 없어 원고 {kind} 모양을 그대로 둠")
-        cap = tbl_src.find(q("hp:caption"))
-        text = " ".join(own_text(p).strip() for p in cap.iter(q("hp:p"))) if cap is not None else ""
-        return text.strip(), None
+        order = keep_original(ctx, sec, r, src, kind, f"양식에 {kind} 예시가 없어")
+        return raw_caption(ctx, r, tbl_src), None, {"순서": order, "원고 그대로": True}
+    mode, numbered = ctx.cap_mode(kind), ctx.cap_numbered(kind)
+    cap_ps = caption_ts(ctx, r, tbl_src, numbered, mode) if mode else []
     tbl = copy.deepcopy(tbl_src)
     old_cap = tbl.find(q("hp:caption"))
     if old_cap is not None:
@@ -2251,11 +2511,30 @@ def build_object(ctx: Ctx, sec, r, kind, chap):
             moved += left
     ctx.ms.remap(tbl)
     pp, num = chapter_caption_pp(ctx, kind, chap)
-    set_shell(ctx, tbl, tmpl, cap_ps, pp, kind)
+    text = " ".join(plain(flat(segs)).strip() for segs in cap_ps)
+    info = {"순서": ["개체"]}
+    if counts is not None and cap_ps and num is not None and counts.get(kind, 0) > 0 and CONT_WORD.search(text):
+        info["계속"] = cap_label(num, counts[kind], ctx.cap_total[kind])  # 앞 표·그림과 같은 번호
+    if not numbered:
+        info["번호 둠"] = True
+    set_shell(ctx, tbl, tmpl, cap_ps if mode == "붙음" else [], pp, kind, info.get("계속"))
+    if mode is None:  # 양식에 제목 모양이 없음 → 원고 캡션을 원고 모양 그대로(번호도 원고 것)
+        info["원고 캡션"] = True
+        text = raw_caption(ctx, r, tbl_src)
+        cap_src = tbl_src.find(q("hp:caption"))
+        if cap_src is not None:
+            cap = ms_copy(ctx, cap_src)
+            for j in sorted((r.get("캡션") or {}).get("꺼낼문단") or [], reverse=True):
+                p = cap.find(q("hp:subList")).findall(q("hp:p"))[j]
+                p.getparent().remove(p)
+            tbl.insert(list(tbl).index(tbl.find(q("hp:inMargin"))), cap)
+        if text:
+            ctx.log.append(f"⚠ {r['문단']} 양식에 {kind} 제목(캡션) 모양이 없어 원고 제목을 원고 모양·번호 그대로 둠")
     if kind == "표":  # 쪽보다 길면 secure_tables가 쪽 경계에서 나뉘게 한다(머리행 반복 포함)
         ctx.styled_tbls.append(tbl)
     else:  # 그림 틀(사진 묶음 등): 쪽보다 길면 사진 줄이 잘리지 않게 행 단위로 나눈다
         ctx.frame_tbls.append(tbl)
+    ctx.tbl_names.append((tbl, text))
     rest = []
     for fl in floats:
         if fl in moved:
@@ -2264,8 +2543,41 @@ def build_object(ctx: Ctx, sec, r, kind, chap):
         reposition_float(ctx, c, src, r["문단"])
         ctx.ms.remap(c)
         rest.append(c)
-    object_paragraph(ctx, sec, rest + [tbl], kind)
-    return " ".join(plain(flat(segs)).strip() for segs in cap_ps), num
+    sep = next((x for x in ctx.roles if x.get("붙일곳") == r["문단"]), None)
+    if mode == "문단" and cap_ps:  # 제목을 개체 위(표)·아래(그림)에 따로 문단으로 — 개체와 같은 쪽에 오게 한다
+        caps = caption_paras(ctx, kind, cap_ps, pp, info.get("계속"))
+        above = ctx.cap_pos(kind) == "위"
+        for c in (caps if above else caps[:-1]):
+            c.set("paraPrIDRef", ctx.dst.keep_with_next(c.get("paraPrIDRef")))
+        blank = []
+        if above and ctx.out_roles and ctx.out_roles[-1]["역할"] in ("표 문단", "그림 문단", "개체 문단", "캡션 문단") \
+                and ctx.R["본문"].get("빈 줄"):  # 앞 표·그림 바로 밑에 제목이 붙지 않게 — 양식처럼 표 뒤 빈 줄 하나
+            ex = ctx.base.paras()[int(ctx.R["본문"]["빈 줄"][1:])]
+            blank = [set_runs(copy.deepcopy(ex), ctx.tcolor(text_run_cid(ex)), [])]
+            ctx.log.append(f"{r['문단']} 앞 {ctx.out_roles[-1]['원고']}의 표·그림 바로 뒤라 제목 앞에 빈 줄 하나(양식처럼)")
+        if above:
+            sec.extend(blank + caps)
+        op = object_paragraph(ctx, sec, rest + [tbl], kind)
+        if not above:
+            op.set("paraPrIDRef", ctx.dst.keep_with_next(op.get("paraPrIDRef")))
+            sec.extend(caps)
+        ctx.log.append(f"{r['문단']} {kind} 제목 → 양식처럼 {kind} {'위' if above else '아래'}에 따로 문단으로"
+                       + (f"(원고 {sep['문단']} 글자)" if sep else ""))
+        info["순서"] = (["빈 줄"] * len(blank) + [("캡션", k) for k in range(len(caps))] + ["개체"]) if above else \
+            (["개체"] + [("캡션", k) for k in range(len(caps))])
+    elif mode is None and sep:  # 따로 떨어진 원고 제목 문단을 원래 자리에 원고 모양 그대로
+        above = para_key(sep["문단"])[0] < para_key(r["문단"])[0]
+        c = ms_copy(ctx, ms_para(ctx.msp.paras(), sep["문단"]))
+        c.set("id", "0")
+        if above:
+            sec.append(c)
+        object_paragraph(ctx, sec, rest + [tbl], kind)
+        if not above:
+            sec.append(c)
+        info["순서"] = [("캡션", 0), "개체"] if above else ["개체", ("캡션", 0)]
+    else:
+        object_paragraph(ctx, sec, rest + [tbl], kind)
+    return text, num, info
 
 
 def typed_value(s: str):
@@ -2327,12 +2639,20 @@ def norm_caption_segs(ctx: Ctx, r, segs):
     return orig
 
 
-def empty_frame(ctx: Ctx, sec, r, segs, chap):
+def drop_caption(tbl):
+    """양식 예시 개체의 캡션을 뺀다(있을 때만 — 제목을 따로 문단으로 두는 양식의 개체에는 캡션이 없다)."""
+    cap = tbl.find(q("hp:caption"))
+    if cap is not None:
+        tbl.remove(cap)
+
+
+def empty_frame(ctx: Ctx, sec, r, segs, chap, src=None):
     """그림이 아직 없는 캡션 줄 → 양식 그림 틀(크기 그대로, 안은 비움) + 그 아래 캡션(이 장의 캡션 번호).
-    사용자 결정(2026-10-19): '빈 그림 틀을 만들고 그 아래 캡션'. 틀 위의 '【그림 삽입 예정】' 같은 줄은 본문 그대로."""
+    사용자 결정(2026-10-19): '빈 그림 틀을 만들고 그 아래 캡션'. 틀 위의 '【그림 삽입 예정】' 같은 줄은 본문 그대로.
+    제목을 따로 문단으로 두는 양식이면 틀 + 양식 제목 문단(양식 자리). 돌려주는 값 (번호, 결과 문단 순서, 정보)."""
     tmpl = ctx.tmpl_tbl("그림")
     tbl = copy.deepcopy(tmpl)
-    tbl.remove(tbl.find(q("hp:caption")))  # 양식 예시 캡션은 버리고 set_shell이 새로 단다
+    drop_caption(tbl)  # 양식 예시 캡션은 버리고 set_shell이 새로 단다
     ctx.frame_id = getattr(ctx, "frame_id", 1300000000) + 1
     tbl.set("id", str(ctx.frame_id))  # 같은 양식 틀을 여러 번 쓰므로 개체 id는 따로
     f = cell_format(ctx, direct_cells(tmpl)[0], ctx.R["표그림"].get("그림 틀 안 스타일"))
@@ -2350,13 +2670,31 @@ def empty_frame(ctx: Ctx, sec, r, segs, chap):
     restyle_frame(ctx, tbl, tmpl, [], r["문단"])
     ctx.tg.remap(tbl)
     pp, num = chapter_caption_pp(ctx, "그림", chap)
-    set_shell(ctx, tbl, tmpl, [segs] if segs else [], pp)
+    mode = ctx.cap_mode("그림")
+    set_shell(ctx, tbl, tmpl, [segs] if segs and mode == "붙음" else [], pp)
     strip_layout(tbl)
-    object_paragraph(ctx, sec, [tbl], "그림")
+    caps, info = [], {}
+    if segs and mode == "문단":
+        caps = caption_paras(ctx, "그림", [segs], pp)
+    elif segs and mode is None and src is not None:  # 양식에 제목 모양이 없음 → 원고 캡션 줄을 원고 모양 그대로
+        c = ms_copy(ctx, src)
+        c.set("id", "0")
+        caps, info = [c], {"원고 캡션": True}
+    above = ctx.cap_pos("그림") == "위" and mode == "문단"
+    for c in (caps if above else caps[:-1]):
+        c.set("paraPrIDRef", ctx.dst.keep_with_next(c.get("paraPrIDRef")))
+    if above:
+        sec.extend(caps)
+    op = object_paragraph(ctx, sec, [tbl], "그림")
+    if not above:
+        if caps:
+            op.set("paraPrIDRef", ctx.dst.keep_with_next(op.get("paraPrIDRef")))
+        sec.extend(caps)
     sz = tmpl.find(q("hp:sz"))
     ctx.log.append(f"{r['문단']} 옆에 그림 없는 캡션 줄 → 양식 그림 틀(빈 틀 {int(sz.get('width')) / MM:.0f}×"
-                   f"{int(sz.get('height')) / MM:.0f} mm) + 아래 캡션(결정 '개체 없는 캡션': 빈 틀)")
-    return num
+                   f"{int(sz.get('height')) / MM:.0f} mm) + {'위' if above else '아래'} 캡션(결정 '개체 없는 캡션': 빈 틀)")
+    order = ([("캡션", k) for k in range(len(caps))] + ["개체"]) if above else (["개체"] + [("캡션", k) for k in range(len(caps))])
+    return num, order, info
 
 
 def fit_pic(pic, width: int):
@@ -2382,14 +2720,17 @@ def bare_picture_frame(ctx: Ctx, sec, r, src):
     """틀 없이 놓인 그림(캡션 없음) → 양식 그림 틀(폭·선·안 여백 그대로) 안에 글자처럼 넣는다. 틀 안 폭보다 넓으면
     비율대로 줄이고, 틀 높이는 그림에 맞춘다. 캡션·번호는 달지 않는다(사용자 결정 2026-10-26)."""
     tmpl = ctx.tmpl_tbl("그림")
+    if tmpl is None or len(direct_cells(tmpl)) != 1:  # 양식에 한 칸짜리 그림 틀이 없음 → 그림을 원고 모양 그대로
+        keep = [ms_copy(ctx, o) for o in objects(src)]
+        object_paragraph(ctx, sec, keep, "그림")
+        ctx.log.append(f"⚠ {r['문단']} 틀 없는 그림 {len(keep)}개 — 양식에 한 칸짜리 그림 틀이 없어 원고 모양 그대로 둠")
+        return False
     tbl = copy.deepcopy(tmpl)
-    tbl.remove(tbl.find(q("hp:caption")))
+    drop_caption(tbl)
     ctx.frame_id = getattr(ctx, "frame_id", 1300000000) + 1
     tbl.set("id", str(ctx.frame_id))
     f = cell_format(ctx, direct_cells(tmpl)[0], ctx.R["표그림"].get("그림 틀 안 스타일"))
     cells = direct_cells(tbl)
-    if len(cells) != 1:
-        raise SystemExit(f"{r['문단']} 양식 그림 틀이 1칸이 아니라 틀 없는 그림을 넣지 못함")
     tc = cells[0]
     sl = tc.find(q("hp:subList"))
     for p in sl.findall(q("hp:p")):
@@ -2427,6 +2768,7 @@ def bare_picture_frame(ctx: Ctx, sec, r, src):
     strip_layout(tbl)
     object_paragraph(ctx, sec, [tbl], "그림")
     ctx.log.append(f"{r['문단']} 틀 없이 놓인 그림 {len(pics)}개 → 양식 그림 틀 안에(캡션·번호 없음, 사용자 결정 2026-10-26)")
+    return True
 
 
 MARKER = re.compile(r"^\s*[【\[][^】\]]{0,40}[】\]]\s*$")  # '【그림 삽입 예정】' 같은 자리표시 한 줄
@@ -2444,25 +2786,155 @@ def keep_marker_with_frame(ctx: Ctx, sec):
 def build_lone_caption(ctx: Ctx, sec, r, src, kind, chap):
     """옆에 표·그림이 없는 캡션 줄(예: '【그림 삽입 예정】' 다음 줄). 결정 '개체 없는 캡션'이 "빈 틀"(기본)이고 그림이면
     양식 빈 그림 틀 + 아래 캡션, 아니면 양식 캡션 문단 모양 + 이 장의 캡션 번호. 직접 친 번호·공백은 캡션과 같은 규칙.
-    돌려주는 값: (캡션 글자, 번호 정의, 빈 틀을 만들었는지)."""
-    segs = norm_caption_segs(ctx, r, text_segs(src))
+    돌려주는 값: (캡션 글자, 번호 정의, 빈 틀을 만들었는지, 결과 문단 순서, 정보 — build_object와 같은 꼴)."""
+    numbered = ctx.cap_numbered(kind)
+    segs = norm_caption_segs(ctx, r, text_segs(src)) if numbered else text_segs(src)
     cap = plain(flat(segs)).strip()
-    if kind == "그림" and ctx.D.get("개체 없는 캡션", "빈 틀") == "빈 틀":
+    info = {} if numbered else {"번호 둠": True}
+    if kind == "그림" and ctx.D.get("개체 없는 캡션", "빈 틀") == "빈 틀" and ctx.tmpl_tbl("그림") is not None:
         keep_marker_with_frame(ctx, sec)
-        return cap, empty_frame(ctx, sec, r, segs, chap), True
-    tcp = ctx.tmpl_tbl(kind).find(q("hp:caption")).find(q("hp:subList")).find(q("hp:p"))
+        num, order, more = empty_frame(ctx, sec, r, segs, chap, src)
+        return cap, num, True, order, {**info, **more}
+    if caption_head(ctx, kind) is None:  # 양식에 제목 모양이 없음 → 원고 줄을 원고 모양 그대로
+        c = ms_copy(ctx, src)
+        c.set("id", "0")
+        sec.append(c)
+        ctx.log.append(f"⚠ {r['문단']} 옆에 {kind} 없는 제목 줄 — 양식에 {kind} 제목 모양이 없어 원고 모양 그대로 둠")
+        return cap, None, False, ["개체"], {"원고 그대로": True}
     pp, num = chapter_caption_pp(ctx, kind, chap)
-    if pp is None:  # 글자 안 자동 번호 캡션 양식
-        sec.append(inline_caption_para(ctx, ctx.tg.copy(tcp), segs, kind))
-        ctx.log.append(f"{r['문단']} 옆에 {kind} 없는 캡션 줄 → 양식 캡션 모양·번호 문단(결정 '개체 없는 캡션')")
-        return cap, num, False
-    p = etree.SubElement(sec, q("hp:p"))
-    for k, v in (("id", "0"), ("paraPrIDRef", pp), ("styleIDRef", ctx.tg.style(tcp.get("styleIDRef"))),
-                 ("pageBreak", "0"), ("columnBreak", "0"), ("merged", "0")):
-        p.set(k, v)
-    ctx.set_seg_runs(p, ctx.tg.char_pr(text_run_cid(tcp)), segs)
+    sec.append(caption_para(ctx, kind, segs, pp))
     ctx.log.append(f"{r['문단']} 옆에 {kind} 없는 캡션 줄 → 양식 캡션 모양·번호 문단(결정 '개체 없는 캡션')")
-    return cap, num, False
+    return cap, num, False, ["개체"], info
+
+
+def put_roles(ctx: Ctx, info, ent: dict, kind: str):
+    """결과 문단 순서대로 역할 기록 — 개체 문단(ent)과 따로 놓인 제목 문단('캡션 문단'). 검증(check_text·check_format)이 쓴다."""
+    if info.get("원고 그대로"):
+        ent["원고 그대로"] = True
+    if info.get("원고 그대로") or info.get("원고 캡션") or info.get("번호 둠"):
+        ent["번호 둠"] = True
+    caps = [x for x in info["순서"] if x not in ("개체", "빈 줄")]
+    if info.get("계속") and not caps:  # 개체에 붙은 캡션 안에 글자로 넣은 번호
+        ent["글자번호"] = info["계속"] + " "
+    for x in info["순서"]:
+        if x == "개체":
+            ctx.out_roles.append(ent)
+            continue
+        if x == "빈 줄":  # 앞 표·그림과 띄우려고 넣은 빈 줄(양식처럼)
+            ctx.out_roles.append({"역할": "빈 줄", "원고": ent["원고"]})
+            continue
+        c = {"역할": "캡션 문단", "원고": ent["원고"], "종류": kind}
+        if x[1] == 0 and info.get("계속"):
+            c["글자번호"] = info["계속"] + " "
+        if info.get("원고 그대로") or info.get("원고 캡션"):
+            c["원고 그대로"] = True
+        ctx.out_roles.append(c)
+
+
+OBJECT_ROLES = ("표 문단", "그림 문단", "그림 문단(틀 없음)", "개체 문단(그대로)", "표 캡션(개체 없음)", "그림 캡션(개체 없음)")
+
+
+def object_role(ctx: Ctx, sec, r, src, role, chap, cap_count):
+    """표·그림·개체 문단 하나를 결과에 넣는다(build_body가 부른다 — 실패하면 object_fallback)."""
+    if role in ("표 문단", "그림 문단"):
+        kind = "표" if role.startswith("표") else "그림"
+        cap, num, info = build_object(ctx, sec, r, kind, chap, cap_count)
+        sep = next((x for x in ctx.roles if x.get("붙일곳") == r["문단"]), None)
+        put_roles(ctx, info, {"역할": role, "원고": r["문단"], "캡션원고": sep["문단"] if sep else None}, kind)
+        if not cap:  # 캡션 없는 개체는 번호가 붙지 않는다 → 세지 않고 차례에도 넣지 않음
+            ctx.log.append(f"{r['문단']} {kind}: 원고에 캡션 없음 → 캡션·번호 없이")
+            return
+        if num is None:  # 양식에 예시·번호가 없어 원고 캡션(번호 포함)을 그대로 둔 것
+            ctx.toc_entries.append((kind, cap))
+            return
+        typed = (sep or {}).get("직접기호") or (r.get("캡션") or {}).get("직접번호")
+        if info.get("계속"):  # 이어지는 표·그림: 앞과 같은 번호(글자), 세지 않고 차례에도 넣지 않음
+            check_typed(ctx, r, typed, info["계속"], isinstance(num, InlineNum) or typed_cap_same(typed, chap, cap_count[kind]))
+            ctx.approved.append({"문단": r["문단"], "내용": f"이어지는 {kind}('(계속)')의 번호 '{info['계속']}'를 글자로 넣음"
+                                                         f"(앞 {kind}{'와' if kind == '표' else '과'} 같은 번호 — 번호를 늘리지 않음)"})
+            ctx.log.append(f"{r['문단']} {kind} 제목에 '(계속)' → 앞 {kind}{'와' if kind == '표' else '과'} 같은 번호 '{info['계속']}'를 글자로(번호를 늘리지 않음, 차례에 넣지 않음)")
+            return
+        cap_count[kind] += 1
+        ctx.cap_total[kind] += 1
+        auto = cap_label(num, cap_count[kind], ctx.cap_total[kind])
+        check_typed(ctx, r, typed, auto, isinstance(num, InlineNum) or typed_cap_same(typed, chap, cap_count[kind]))
+        ctx.toc_entries.append((kind, f"{auto} {cap}"))
+        if kind == "표":  # 캡션이 아래라 긴 표는 캡션 쪽 ≠ 시작 쪽 → 첫 본문 행 글자로 시작 쪽을 찾는다
+            rows = src.find(f".//{q('hp:tbl')}").findall(q("hp:tr"))
+            if len(rows) > 1:
+                ctx.toc_anchor[len(ctx.toc_entries) - 1] = " ".join(
+                    own_text(p) for tc in rows[1].findall(q("hp:tc")) for p in tc.find(q("hp:subList")).findall(q("hp:p")))
+    elif role.endswith("캡션(개체 없음)"):
+        kind = "표" if role.startswith("표") else "그림"
+        cap, num, framed, order, info = build_lone_caption(ctx, sec, r, src, kind, chap)
+        # 빈 틀을 만들었으면 결과에서는 그림 문단(틀 + 캡션) — 검증도 그림 문단처럼
+        put_roles(ctx, {**info, "순서": order}, {"역할": "그림 문단", "원고": r["문단"], "빈 틀": True} if framed
+                  else {"역할": role, "원고": r["문단"]}, kind)
+        if num is None:
+            if cap:
+                ctx.toc_entries.append((kind, cap))
+            return
+        cap_count[kind] += 1
+        ctx.cap_total[kind] += 1
+        auto = cap_label(num, cap_count[kind], ctx.cap_total[kind])
+        check_typed(ctx, r, r.get("직접기호"), auto, isinstance(num, InlineNum) or typed_cap_same(r.get("직접기호"), chap, cap_count[kind]))
+        ctx.toc_entries.append((kind, f"{auto} {cap}"))
+    elif role == "그림 문단(틀 없음)":
+        framed = bare_picture_frame(ctx, sec, r, src)
+        ctx.out_roles.append({"역할": "그림 문단", "원고": r["문단"], "틀 없음": True, **({} if framed else {"원고 그대로": True})})
+    elif role == "개체 문단(그대로)":
+        keep = [copy.deepcopy(o) for o in objects(src)]
+        for o in keep:
+            ctx.ms.remap(o)
+            strip_layout(o)
+        object_paragraph(ctx, sec, keep, "그림")
+        ctx.out_roles.append({"역할": "개체 문단", "원고": r["문단"]})
+        ctx.log.append(f"{r['문단']} 표 밖 개체 {[local(o) for o in keep]} → 원고 모양 그대로 가운데 문단에")
+
+
+def object_fallback(ctx: Ctx, sec, r, src, role, e):
+    """표·그림 하나를 양식 모양으로 바꾸다 오류가 나면: 그 개체만 원고 모양 그대로 두고(글자·그림 보존) 알림을 남긴다 —
+    낯선 구조의 양식·원고 하나 때문에 변환 전체가 멈추지 않게."""
+    why = "양식 모양으로 바꾸다 문제가 생겨"
+    ctx.log.append(f"{r['문단']} 오류 자세히: {type(e).__name__}: {e}")
+    if role in ("표 문단", "그림 문단"):
+        kind = "표" if role.startswith("표") else "그림"
+        order = keep_original(ctx, sec, r, src, kind, why)
+        put_roles(ctx, {"순서": order, "원고 그대로": True}, {"역할": role, "원고": r["문단"]}, kind)
+        cap = raw_caption(ctx, r, next((o for o in objects(src) if local(o) == "tbl"), None))
+        if cap:
+            ctx.toc_entries.append((kind, cap))
+    elif role.endswith("캡션(개체 없음)"):
+        c = ms_copy(ctx, src)
+        c.set("id", "0")
+        sec.append(c)
+        ctx.out_roles.append({"역할": role, "원고": r["문단"], "원고 그대로": True, "번호 둠": True})
+        ctx.log.append(f"⚠ {r['문단']} 제목 줄 '{own_text(src).strip()[:30]}' — {why} 원고 모양 그대로 둠(한글에서 확인해 주세요)")
+    else:
+        keep = [ms_copy(ctx, o) for o in objects(src)]
+        object_paragraph(ctx, sec, keep, "그림")
+        ctx.out_roles.append({"역할": "그림 문단", "원고": r["문단"], "틀 없음": True, "원고 그대로": True}
+                             if role == "그림 문단(틀 없음)" else {"역할": "개체 문단", "원고": r["문단"]})
+        ctx.log.append(f"⚠ {r['문단']} 그림·개체 {len(keep)}개 — {why} 원고 모양 그대로 둠(한글에서 확인해 주세요)")
+
+
+def snapshot(ctx: Ctx, sec, counts) -> dict:
+    """object_role 앞의 상태 — 실패하면 되돌린다(반쯤 만든 문단·기록이 남지 않게)."""
+    return {"p": len(sec.findall(q("hp:p"))), "roles": len(ctx.out_roles), "toc": len(ctx.toc_entries),
+            "ap": len(ctx.approved), "st": len(ctx.styled_tbls), "fr": len(ctx.frame_tbls), "names": len(ctx.tbl_names),
+            "counts": dict(counts), "total": Counter(ctx.cap_total)}
+
+
+def restore(ctx: Ctx, sec, s: dict, counts):
+    for p in sec.findall(q("hp:p"))[s["p"]:]:
+        sec.remove(p)
+    del ctx.out_roles[s["roles"]:], ctx.toc_entries[s["toc"]:], ctx.approved[s["ap"]:]
+    del ctx.styled_tbls[s["st"]:], ctx.frame_tbls[s["fr"]:], ctx.tbl_names[s["names"]:]
+    for k in [k for k in ctx.toc_anchor if k >= s["toc"]]:
+        del ctx.toc_anchor[k]
+    counts.clear()
+    counts.update(s["counts"])
+    ctx.cap_total = s["total"]
 
 
 def build_body(ctx: Ctx):
@@ -2488,8 +2960,8 @@ def build_body(ctx: Ctx):
     else:
         first_chap, title_pp, hdrs = 1, None, {}
         ctx.log.append("원고에 장 제목이 없음 → 장 없이 본문만")
-    if ctx.D.get("머리말글자") == "지정":  # 설문으로 머리말을 정함 → 장마다 새 머리말(오른쪽 칸 = 그 장 제목)
-        hdrs = {i: "지정" for i in range(max(1, len(chapters)))}
+    if ctx.D.get("머리말글자") in ("지정", "양식"):  # 설문으로 머리말을 정함 → 장마다 새 머리말(장 제목 칸 = 그 장 제목)
+        hdrs = {i: ctx.D["머리말글자"] for i in range(max(1, len(chapters)))}
     doc_label = ctx.D.get("문서 제목", "")
     started = False
     outline = ctx.dst.get("numbering", ctx.base.sections[0].find(f".//{q('hp:secPr')}").get("outlineShapeIDRef"))
@@ -2498,6 +2970,7 @@ def build_body(ctx: Ctx):
     ctx.no_chapters = not chapters
     for r in ctx.roles:
         role, src = r["역할"], ms_para(mp, r["문단"])
+        step("본문", 문단=r["문단"], 역할=role, 글자=(r.get("앞30자") or (r.get("캡션") or {}).get("글자") or "")[:40])
         if role == "장 제목":
             k += 1
             prev, chap = chap, (first_chap if k == 0 else assigned.get(r["문단"], chap + 1))
@@ -2569,50 +3042,15 @@ def build_body(ctx: Ctx):
                 auto = head_text(outline, lv, hcount)
                 check_typed(ctx, r, r.get("지울번호"), auto, typed_value(r.get("지울번호")) in (None, hcount[lv]))
                 ctx.toc_entries.append((role, f"{auto} {plain(flat(segs)).strip()}"))
-        elif role in ("표 문단", "그림 문단"):
-            kind = "표" if role.startswith("표") else "그림"
-            cap, num = build_object(ctx, sec, r, kind, chap)
-            sep = next((x for x in ctx.roles if x.get("붙일곳") == r["문단"]), None)
-            ctx.out_roles.append({"역할": role, "원고": r["문단"], "캡션원고": sep["문단"] if sep else None})
-            if not cap:  # 캡션 없는 개체는 번호가 붙지 않는다 → 세지 않고 차례에도 넣지 않음
-                ctx.log.append(f"{r['문단']} {kind}: 원고에 캡션 없음 → 캡션·번호 없이")
-                continue
-            if num is None:  # 양식에 예시가 없어 원고 개체·캡션을 그대로 둔 것
-                ctx.toc_entries.append((kind, cap))
-                continue
-            cap_count[kind] += 1
-            ctx.cap_total[kind] += 1
-            auto = cap_label(num, cap_count[kind], ctx.cap_total[kind])
-            typed = (sep or {}).get("직접기호") or (r.get("캡션") or {}).get("직접번호")
-            check_typed(ctx, r, typed, auto, isinstance(num, InlineNum) or typed_cap_same(typed, chap, cap_count[kind]))
-            ctx.toc_entries.append((kind, f"{auto} {cap}"))
-            if kind == "표":  # 캡션이 아래라 긴 표는 캡션 쪽 ≠ 시작 쪽 → 첫 본문 행 글자로 시작 쪽을 찾는다
-                rows = src.find(f".//{q('hp:tbl')}").findall(q("hp:tr"))
-                if len(rows) > 1:
-                    ctx.toc_anchor[len(ctx.toc_entries) - 1] = " ".join(
-                        own_text(p) for tc in rows[1].findall(q("hp:tc")) for p in tc.find(q("hp:subList")).findall(q("hp:p")))
-        elif role.endswith("캡션(개체 없음)"):
-            kind = "표" if role.startswith("표") else "그림"
-            cap, num, framed = build_lone_caption(ctx, sec, r, src, kind, chap)
-            # 빈 틀을 만들었으면 결과에서는 그림 문단(틀 + 캡션) — 검증도 그림 문단처럼
-            ctx.out_roles.append({"역할": "그림 문단", "원고": r["문단"], "빈 틀": True} if framed
-                                 else {"역할": role, "원고": r["문단"]})
-            cap_count[kind] += 1
-            ctx.cap_total[kind] += 1
-            auto = cap_label(num, cap_count[kind], ctx.cap_total[kind])
-            check_typed(ctx, r, r.get("직접기호"), auto, isinstance(num, InlineNum) or typed_cap_same(r.get("직접기호"), chap, cap_count[kind]))
-            ctx.toc_entries.append((kind, f"{auto} {cap}"))
-        elif role == "그림 문단(틀 없음)":
-            bare_picture_frame(ctx, sec, r, src)
-            ctx.out_roles.append({"역할": "그림 문단", "원고": r["문단"], "틀 없음": True})
-        elif role == "개체 문단(그대로)":
-            keep = [copy.deepcopy(o) for o in objects(src)]
-            for o in keep:
-                ctx.ms.remap(o)
-                strip_layout(o)
-            object_paragraph(ctx, sec, keep, "그림")
-            ctx.out_roles.append({"역할": "개체 문단", "원고": r["문단"]})
-            ctx.log.append(f"{r['문단']} 표 밖 개체 {[local(o) for o in keep]} → 원고 모양 그대로 가운데 문단에")
+        elif role in OBJECT_ROLES:
+            snap = snapshot(ctx, sec, cap_count)
+            try:
+                object_role(ctx, sec, r, src, role, chap, cap_count)
+            except Exception as e:  # noqa: BLE001 — 개체 하나 때문에 변환 전체가 멈추지 않게(원고 모양 그대로 + 알림)
+                if ctx.D.get("개체 오류 멈춤"):  # 시험용: 오류를 그대로 보고 싶을 때
+                    raise
+                restore(ctx, sec, snap, cap_count)
+                object_fallback(ctx, sec, r, src, role, e)
         elif role == "문서 제목":
             sec.append(doc_title_para(ctx, src, segs_of(src)))
             ctx.out_roles.append({"역할": "문서 제목", "원고": r["문단"]})
@@ -2621,10 +3059,12 @@ def build_body(ctx: Ctx):
         if not started and len(sec.findall(q("hp:p"))) > n_before:
             attach_carrier(ctx, sec.find(q("hp:p")), hdrs.get(0), "")  # 장 앞: 머리말 오른쪽 칸(장 제목)은 비움
             started = True
+    step("본문 마무리")
     for s in secs:
         strip_layout(s)
     if any(is_inline(caption_head(ctx, k)) for k in ("표", "그림")):
         fix_numbering_types(ctx, secs)
+    step("큰 표")
     secure_tables(ctx, secs)
     return secs
 
@@ -2645,7 +3085,8 @@ def fix_numbering_types(ctx: Ctx, secs):
             head = cap.find(q("hp:subList")).find(q("hp:p")) if cap is not None else None
             a = next((c.find(q("hp:autoNum")) for r in head.findall(q("hp:run")) for c in r if autonum_ctrl(c)), None) \
                 if head is not None else None
-            want = a.get("numType") if a is not None else ("NONE" if cap is None else el.get("numberingType"))
+            # 자동 번호가 없는 캡션('(계속)' 표의 글자 번호 등)도 번호를 차지하지 않게 '없음'
+            want = a.get("numType") if a is not None else "NONE"
             if el.get("numberingType") != want:
                 el.set("numberingType", want)
                 n_none += want == "NONE"
@@ -3037,17 +3478,22 @@ def page_numbering(ctx: Ctx, sections, front):
 
 def cmd_apply(R: Run):
     R.out.parent.mkdir(parents=True, exist_ok=True)  # 결과구성·로그 JSON을 결과 파일보다 먼저 쓴다(새 작업 폴더)
+    step("준비")
     ctx = Ctx(R)
     bodies = build_body(ctx)
     # 앞표지·차례: 양식에 그 부분이 있고 결정 '표지 만들기'·'차례 만들기'(기본 true)일 때만
     want_cover, want_toc = ctx.D.get("표지 만들기", True), ctx.D.get("차례 만들기", True)
+    step("표지")
     cover = (build_cover(ctx) if ctx.cvp is not None else build_simple_cover(ctx) if want_cover == "간단" else None) \
         if want_cover else None
+    step("차례")
     toc = (build_toc(ctx) if ctx.tocp is not None else build_simple_toc(ctx) if want_toc == "간단" else None) \
         if want_toc else None
     front = [s for s in (cover, toc) if s is not None]
     sections = front + bodies
+    step("쪽 번호")
     page_numbering(ctx, sections, front)
+    step("저장")
     # 한글은 개요 번호를 앞 구역에서 이어 센다 — 앞표지·차례가 다른 개요 번호 모양을 가리키면 본문 장 번호가
     # 1부터 매겨짐(2026-10-16 PDF로 확인) → 앞표지·차례도 본문(첫 구역)의 개요 번호 모양을 가리키게 한다.
     oid = bodies[0].find(f".//{q('hp:secPr')}").get("outlineShapeIDRef")
@@ -3224,7 +3670,8 @@ def cmd_convert(R: Run):
     print(f"변환: {R.src_path.name} → {R.ms_path} (원본 해시 그대로)")
 
 
-FOOT = re.compile(r"^\s*[-–(<\[]?\s*(\d{1,4})\s*[-–)>\]]?\s*$", re.M)  # '- 1 -'·'1'·'(1)' 같은 쪽 번호 줄
+CHAP_PREFIX = r"(?:(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ]|[IVXL]{1,5}|\d{1,2})\s*[-–.]\s*)?"  # 장 번호가 붙은 쪽 번호('Ⅶ - 4'·'7-4')
+FOOT = re.compile(r"^\s*" + CHAP_PREFIX + r"[-–(<\[]?\s*(\d{1,4})\s*[-–)>\]]?\s*$", re.M)  # '- 1 -'·'1'·'(1)'·'Ⅶ - 1' 같은 쪽 번호 줄
 
 
 def norm(s: str) -> str:
@@ -3306,14 +3753,21 @@ def frags(el, skip_caption=True):
 
 
 def object_unit(p, keep=None):
-    """(캡션 글자, 개체 안 글자 조각) — keep: 캡션으로 남긴 캡션 문단 번호(나머지는 본문으로 꺼낸 것)."""
-    tbl = next(o for r in p.findall(q("hp:run")) for o in r if local(o) == "tbl")
+    """(캡션 글자, 개체 안 글자 조각) — keep: 캡션으로 남긴 캡션 문단 번호(나머지는 본문으로 꺼낸 것).
+    표가 없는 문단(원고 모양 그대로 둔 그림 등)은 캡션 없이 개체 안 글자만."""
+    tbl = next((o for r in p.findall(q("hp:run")) for o in r if local(o) == "tbl"), None)
     others = [o for r in p.findall(q("hp:run")) for o in r if local(o) in ("rect", "container", "pic")]
-    cap = tbl.find(q("hp:caption"))
+    cap = tbl.find(q("hp:caption")) if tbl is not None else None
     cps = [] if cap is None else list(cap.iter(q("hp:p"))) if keep is None else \
         [x for j, x in enumerate(cap.find(q("hp:subList")).findall(q("hp:p"))) if j in keep]
     ctext = " / ".join(s for s in (caption_text(x).strip() for x in cps) if s)
-    return ctext, sorted(frags(tbl) + [f for o in others for f in frags(o)])
+    return ctext, sorted((frags(tbl) if tbl is not None else []) + [f for o in others for f in frags(o)])
+
+
+def cut_label(text: str, label) -> str:
+    """'(계속)' 표 제목 앞에 글자로 넣은 번호(승인 변경)를 비교에서 뺀다."""
+    lab = (label or "").strip()
+    return text[len(lab):].strip() if lab and text.startswith(lab) else text
 
 
 def front_count(R: Run) -> int:
@@ -3331,6 +3785,7 @@ def check_text(R: Run, out_pkg: Pkg):
         return 0, [f"결과 문단 수 {len(body)} ≠ 역할 기록 {len(out_roles)}"], 0, 0
     sep = {r["붙일곳"]: r for r in roles if r.get("붙일곳")}
     framed = {o["원고"] for o in out_roles if o.get("빈 틀")}  # 그림 없는 캡션 줄 → 빈 그림 틀 + 캡션으로 만든 것
+    raw = {o["원고"] for o in out_roles if o.get("번호 둠")}  # 원고 캡션 번호를 지우지 않은 것(양식에 자동 번호 없음·원고 그대로)
     units_ms, units_out, approved = [], [], 0
     for r in roles:
         role, src = r["역할"], ms_para(mp, r["문단"])
@@ -3346,7 +3801,7 @@ def check_text(R: Run, out_pkg: Pkg):
                 units_ms.append((r["문단"], role, r["캡션추가"], fs))
                 approved += 1
                 continue
-            new, _, _, ch = caption_norm(cap, R.D)
+            new, _, _, ch = caption_norm(cap, R.D) if r["문단"] not in raw else (cap, 0, 0, [])
             approved += bool(ch)
             units_ms.append((r["문단"], role, new.strip(), fs))
         elif role == "그림 문단(틀 없음)":  # 양식 그림 틀 안에 넣은 그림(글자 없음)
@@ -3356,8 +3811,11 @@ def check_text(R: Run, out_pkg: Pkg):
             pre = r.get("지울번호")
             if pre and R.D.get("제목 직접 번호 삭제", True) and s.startswith(pre):
                 s = s[len(pre):]
-            if role.endswith("캡션(개체 없음)"):
+            if role.endswith("캡션(개체 없음)") and r["문단"] not in raw:
                 s = caption_norm(s, R.D)[0]
+            if r.get("앞기호") and role in HEADING_ROLES + ("본문",):  # 글머리표를 글자로 넣은 것(승인 변경)
+                s = r["앞기호"] + s
+                approved += 1
             units_ms.append((r["문단"], role, s.strip(), [] if r["문단"] in framed else None))
     ap = json.loads(R.f("승인변경.json").read_text(encoding="utf-8")) if R.f("승인변경.json").exists() else []
     added_label = {}  # 양식 장 제목에 자동 번호가 없어 글자로 넣은 장 번호(승인 변경) → 비교에서 뺀다
@@ -3365,12 +3823,21 @@ def check_text(R: Run, out_pkg: Pkg):
         m = re.match(r"장 번호 '(.+?)'를 글자로 넣음", a["내용"])
         if m:
             added_label[a["문단"]] = m.group(1) + " "
+    capt = {}  # 개체 위·아래에 따로 놓인 제목 문단 → 그 개체의 캡션 글자로 모은다
     for p, o in zip(body, out_roles):
-        if o["역할"] == "빈 줄":
+        if o["역할"] == "캡션 문단":
+            t = cut_label(caption_text(p).strip(), o.get("글자번호"))
+            if t:
+                capt[o["원고"]] = f"{capt[o['원고']]} / {t}" if o["원고"] in capt else t
+    for p, o in zip(body, out_roles):
+        if o["역할"] in ("빈 줄", "캡션 문단"):
             continue
         if o["역할"] in ("표 문단", "그림 문단"):
             cap, fs = object_unit(p)
+            cap = cut_label(cap, o.get("글자번호")) or capt.get(o["원고"], "")
             units_out.append((o["원고"], o["역할"], cap, fs))
+        elif o["역할"].endswith("캡션(개체 없음)"):  # 글자 안 자동 번호의 번호 부분('<그림 '·'> ')은 빼고 비교
+            units_out.append((o["원고"], o["역할"], caption_text(p).strip(), None))
         else:
             t = own_text(p)
             lab = added_label.get(o["원고"]) if o["역할"] == "장 제목" else None
@@ -3419,13 +3886,29 @@ def check_format(R: Run, out_pkg: Pkg):
         ps = HT.para_sig(ex.get("paraPrIDRef"))  # object_paragraph: 가운데 정렬, 왼쪽·오른쪽·첫 줄 0
         return ("가운데", "0pt", "0pt", "0pt") + ps[4:], HT.char_sig(text_run_cid(ex))
 
-    def exp(role):
+    def cap_exp(kind, cont=False):
+        """양식 제목(캡션) 문단 모양 — 붙은 캡션의 첫 문단이나 따로 놓인 제목 문단. cont: '(계속)' 제목(번호 없는 모양)."""
+        cp = tmpl_caption(Rr["표그림"], tg, kind)[1]
+        if cont:
+            c = tpara(f"{kind} 계속")
+            if c is not None:
+                return HT.para_sig(c.get("paraPrIDRef")), HT.char_sig(text_run_cid(c))
+            if cp is not None:
+                return HT.para_sig(cp.get("paraPrIDRef"))[:-1] + ("없음",), HT.char_sig(text_run_cid(cp))
+        if cp is None:
+            return None, None
+        return HT.para_sig(cp.get("paraPrIDRef")), HT.char_sig(text_run_cid(cp))
+
+    def exp(o):
+        role = o["역할"]
+        if o.get("원고 그대로"):  # 양식 모양을 입히지 못해 원고 모양 그대로 둔 것(적용로그 ⚠) — 비교하지 않음
+            return None, None
         if role in ("표 문단", "그림 문단"):
             return obj_exp(role[0] if role.startswith("표") else "그림")
+        if role == "캡션 문단":  # 개체 위·아래에 따로 놓인 제목
+            return cap_exp(o["종류"], bool(o.get("글자번호")))
         if role.endswith("캡션(개체 없음)"):  # 양식 표·그림 캡션 문단과 같게(번호 정의만 장마다 다름)
-            t = tpara("표" if role.startswith("표") else "그림").find(f".//{q('hp:tbl')}")
-            cp = t.find(q("hp:caption")).find(q("hp:subList")).find(q("hp:p"))
-            return HT.para_sig(cp.get("paraPrIDRef")), HT.char_sig(text_run_cid(cp))
+            return cap_exp("표" if role.startswith("표") else "그림")
         if role not in want:  # 양식에 없는 제목 단계 — 가까운 단계 모양을 바꿔 씀(적용로그 ⚠), 비교하지 않음
             return None, None
         H, p = want[role]
@@ -3437,9 +3920,9 @@ def check_format(R: Run, out_pkg: Pkg):
     body = [p for s in out_pkg.sections[front_count(R):] for p in s.findall(q("hp:p"))]
     stat, bad, colors = Counter(), [], Counter()
     for p, o in zip(body, out_roles):
-        ep, ec = exp(o["역할"])
+        ep, ec = exp(o)
         if ep is None:
-            stat[(o["역할"] + " (양식에 없는 단계 — 대체)", True)] += 1
+            stat[(o["역할"] + (" (원고 모양 그대로 — 알림 참고)" if o.get("원고 그대로") else " (양식에 없는 단계 — 대체)"), True)] += 1
             continue
         ap = HO.para_sig(p.get("paraPrIDRef"))
         cids = {r.get("charPrIDRef") for r in p.findall(q("hp:run"))}
@@ -3471,14 +3954,17 @@ def check_format(R: Run, out_pkg: Pkg):
             e_cap[k] = (HT.para_sig(cp.get("paraPrIDRef")), HT.char_sig(text_run_cid(cp)))
     cstat, cbad, fills = Counter(), [], Counter()
     for p, o in zip(body, out_roles):
-        if o["역할"] not in ("표 문단", "그림 문단"):
+        if o["역할"] not in ("표 문단", "그림 문단") or o.get("원고 그대로"):
             continue
         kind = "표" if o["역할"].startswith("표") else "그림"
         tbl = p.find(f".//{q('hp:tbl')}")
+        if tbl is None:
+            continue
         cap = tbl.find(q("hp:caption"))
         if cap is not None and kind in e_cap:
             cp = cap.find(q("hp:subList")).find(q("hp:p"))
-            okc = (HO.para_sig(cp.get("paraPrIDRef")), HO.char_sig(text_run_cid(cp))) == e_cap[kind]
+            want_c = e_cap[kind] if not o.get("글자번호") else (e_cap[kind][0][:-1] + ("없음",), e_cap[kind][1])  # '(계속)': 번호 없음
+            okc = (HO.para_sig(cp.get("paraPrIDRef")), HO.char_sig(text_run_cid(cp))) == want_c
             cstat[("캡션", okc)] += 1
             if not okc:
                 cbad.append(f"{o['원고']} 캡션")
@@ -3554,7 +4040,7 @@ def check_tables(R: Run, out_pkg: Pkg) -> list:
     return out
 
 
-OVER_IGNORE = re.compile(r"[-–—(<\[]?\s*\d{1,4}(\s*/\s*\d{1,4})?\s*[-–—)>\]]?")
+OVER_IGNORE = re.compile(CHAP_PREFIX + r"[-–—(<\[]?\s*\d{1,4}(\s*/\s*\d{1,4})?\s*[-–—)>\]]?")
 
 
 def pdf_overflow(R: Run, out_pkg: Pkg, doc) -> list:
