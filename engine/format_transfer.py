@@ -2716,6 +2716,64 @@ def drop_lead_space(ctx: Ctx, r, segs):
     return [(c, ts) for c, ts in out if ts]
 
 
+SUB_MARK = re.compile(r"^(?:[-–—○●◦□■◇◆▶▷►•·∙ㆍ*]|\(?\d{1,2}\)|\(?[가-힣]\)|[①-⑳㉠-㉭㉮-㉻])")  # 항목 기호('※' 주석은 뺌)
+
+
+def pt_val(s: str) -> float:
+    m = re.match(r"^(-?[\d.]+)pt$", s or "")
+    return float(m.group(1)) if m else 0.0
+
+
+def body_sublevels(ctx: Ctx) -> dict:
+    """원고 본문 항목의 들여쓰기 단계 → {문단: 단계(1 이상)}. 같은 제목 아래에서 앞 항목보다 확실히 더 들어간
+    (글자 크기의 3/4 넘게 — 빈칸 2개 이상) 기호 항목은 하위 항목. 자리 = 원고 문단 왼쪽 여백 + 첫 줄 들여쓰기(양수) + 맨 앞 빈칸.
+    '※' 주석은 단계에 넣지 않고, 기호 없는 문장은 그 자리부터 새로 센다(그 아래 항목은 하위).
+    2026-11-11 사용자: 본문 앞 빈칸은 지우되 '하위 항목만 들여 보이게'(빈칸이 아니라 문단 모양으로)."""
+    desc = Desc(ctx.msp.header)
+    mp = ctx.msp.paras()
+    out, stack = {}, []
+    for r in ctx.roles:
+        role = r["역할"]
+        if role in HEADING_ROLES or role in ("장 제목", "문서 제목"):
+            stack = []
+            continue
+        if role != "본문":
+            continue
+        p = ms_para(mp, r["문단"])
+        raw = own_text(p)
+        text = raw.lstrip(LEAD_WS)
+        if not text.strip() or text.startswith("※"):
+            continue
+        em = int(desc.char_prs[text_run_cid(p)].get("height", "1000")) / 100
+        m, _ = desc.margin(p.get("paraPrIDRef"))
+        ws = sum({"　": 1.0, "\t": 2.0}.get(c, 0.5) for c in raw[:len(raw) - len(text)]) * em
+        x = pt_val(m["left"]) + max(pt_val(m["intent"]), 0.0) + ws
+        if not (r.get("앞기호") or SUB_MARK.match(text)):  # 기호 없는 문장: 여기부터 새로
+            stack = [x]
+            continue
+        tol = 0.75 * em
+        while stack and x < stack[-1] - tol:
+            stack.pop()
+        if not stack:
+            stack = [x]
+        elif x > stack[-1] + tol:
+            stack.append(x)
+        if len(stack) > 1:
+            out[r["문단"]] = len(stack) - 1
+    return out
+
+
+def indent_more(ctx: Ctx, pid: str, add_pt: float) -> str:
+    """문단 모양 사본의 왼쪽 여백을 add_pt만큼 늘린다(hp:case는 실제 값 ×100, hp:default·switch 없는 값은 ×200으로 저장)."""
+    def fn(n):
+        for m in n.iter(q("hh:margin")):
+            e = m.find(q("hc:left"))
+            if e is not None:
+                factor = 100 if local(m.getparent()) == "case" else 200
+                e.set("value", str(int(e.get("value", "0")) + round(add_pt * factor)))
+    return ctx.dst.variant("paraPr", pid, fn)
+
+
 def drop_typed_number(ctx: Ctx, r, segs):
     """제목·장 제목에 글자로 친 번호(역할매핑 '지울번호')를 뺀다 — 양식 자동 번호와 겹치므로
     (결정 '제목 직접 번호 삭제', 기본 true). 승인된 변경으로 기록. segs: text_segs 결과(글자 조각을 직접 고침)."""
@@ -3101,6 +3159,12 @@ def build_body(ctx: Ctx):
     limit = int(ctx.D.get("연속빈줄", 1))
     k, chap, blanks, hcount, cap_count = -1, first_chap, 0, {}, {"표": 0, "그림": 0}
     ctx.no_chapters = not chapters
+    # 하위 항목(원고에서 앞 항목보다 더 들여 쓴 기호 항목): 양식 본문 모양 + 왼쪽 여백 한 단계 = 본문 글자 한 칸
+    sub = body_sublevels(ctx) if ctx.D.get("하위 항목 들여쓰기", True) else {}
+    sub_pt = int(Desc(ctx.base.header).char_prs[text_run_cid(ex["본문"])].get("height", "1000")) / 100 if sub else 0
+    if sub:
+        ctx.log.append(f"하위 항목 {len(sub)}문단 → 양식 본문 모양에 왼쪽 여백 +{sub_pt:g}pt × 단계(원고에서 더 들여 쓴 항목, "
+                       "결정 '하위 항목 들여쓰기')")
     for r in ctx.roles:
         role, src = r["역할"], ms_para(mp, r["문단"])
         step("본문", 문단=r["문단"], 역할=role, 글자=(r.get("앞30자") or (r.get("캡션") or {}).get("글자") or "")[:40])
@@ -3166,8 +3230,11 @@ def build_body(ctx: Ctx):
             np = ctx.set_seg_runs(copy.deepcopy(e), ctx.tcolor(text_run_cid(e)), segs)
             if role in HEADING_ROLES and ctx.D.get("제목 다음 문단과 함께", True):
                 np.set("paraPrIDRef", ctx.dst.keep_with_next(np.get("paraPrIDRef")))
+            more = sub.get(r["문단"], 0) * sub_pt if role == "본문" else 0
+            if more:
+                np.set("paraPrIDRef", indent_more(ctx, np.get("paraPrIDRef"), more))
             sec.append(np)
-            ctx.out_roles.append({"역할": role, "원고": r["문단"]})
+            ctx.out_roles.append({"역할": role, "원고": r["문단"], **({"왼쪽더함": more} if more else {})})
             if role in HEADING_ROLES:
                 lv = int(ctx.dst.get("paraPr", e.get("paraPrIDRef")).find(q("hh:heading")).get("level")) + 1
                 hcount[lv] = hcount.get(lv, 0) + 1
@@ -4262,6 +4329,8 @@ def check_format(R: Run, out_pkg: Pkg):
         ps = H.para_sig(p.get("paraPrIDRef"))
         if role == "장 제목":  # 번호 방식만 개요 1수준으로 바꿈(모양은 같음)
             ps = ps[:-1] + ("OUTLINE level=0",)
+        if o.get("왼쪽더함"):  # 하위 항목: 양식 본문 모양 + 왼쪽 여백
+            ps = (ps[0], f"{pt_val(ps[1]) + o['왼쪽더함']:g}pt") + ps[2:]
         return ps, H.char_sig(text_run_cid(p))
     out_roles = json.loads(R.f("결과역할.json").read_text(encoding="utf-8"))
     body = [p for s in out_pkg.sections[front_count(R):] for p in s.findall(q("hp:p"))]
