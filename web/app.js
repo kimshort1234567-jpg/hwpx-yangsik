@@ -27,7 +27,7 @@ def call(name, args_json):
     try:
         return json.dumps({"ok": True, "data": getattr(service, name)(*json.loads(args_json))}, ensure_ascii=False)
     except (service.UserError, SystemExit) as e:
-        return json.dumps({"ok": False, "user": True, "error": str(e)}, ensure_ascii=False)
+        return json.dumps({"ok": False, "user": True, "error": str(e), "help": getattr(e, "help", None)}, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"ok": False, "user": False, "error": f"{type(e).__name__}: {e}",
                            "trace": traceback.format_exc()[-3000:]}, ensure_ascii=False)
@@ -127,6 +127,29 @@ function errorText(res) {
   if (res.user) return res.error;
   console.error(res.error, res.trace || "");
   return "변환 중 문제가 생겼습니다: " + res.error + " (같은 파일로 계속 안 되면 알려 주세요)";
+}
+
+/* 엔진 오류 안내: 무엇을 하다가 · 원고 어디서 · 왜 · 이렇게 해 보세요 + 오류 정보(복사). help가 없으면 한 줄 글자 */
+function showProblem(id, res) {
+  const h = res.help;
+  if (!h) { showError(id, errorText(res)); return; }
+  const el = $(id);
+  const tips = (h["해 볼 것"] || []).map((t) => `<li>${esc(t)}</li>`).join("");
+  const detail = h["기술 정보"] || res.error || "";
+  el.innerHTML = `
+    <p class="err-title">${esc(h["제목"])}</p>
+    ${h["어디서"] ? `<p class="err-row"><b>어디서</b> ${esc(h["어디서"])}</p>` : ""}
+    ${h["이유"] ? `<p class="err-row"><b>이유</b> ${esc(h["이유"])}</p>` : ""}
+    ${tips ? `<p class="err-row"><b>이렇게 해 보세요</b></p><ol class="err-tips">${tips}</ol>` : ""}
+    <details class="err-detail"><summary>오류 정보</summary><pre>${esc(detail)}</pre>
+      <button type="button" class="linkbtn" data-copy>오류 정보 복사</button></details>`;
+  el.hidden = false;
+  const btn = el.querySelector("[data-copy]");
+  btn.addEventListener("click", async () => {
+    const text = `[보고서 양식 맞춤 오류]\n${h["제목"]}\n${h["어디서"] ? "어디서: " + h["어디서"] + "\n" : ""}${detail}`;
+    try { await navigator.clipboard.writeText(text); btn.textContent = "복사했습니다"; }
+    catch { btn.textContent = "복사하지 못했습니다 — 위 글자를 직접 선택해 복사해 주세요"; }
+  });
 }
 
 /* ---------------------------------------------------------------- 파일 받기 */
@@ -335,7 +358,7 @@ async function takeFile(kind, input, saved) {
     if (!m.res.ok) {
       // 양식 분석이 실패하면 엔진 쪽 양식도 이미 바뀌었으므로 화면의 양식도 비운다(다시 고르게)
       if (kind === "template" && state.template) resetTemplate();
-      showError(errId, errorText(m.res));
+      showProblem(errId, m.res);
       return;
     }
     if (kind === "template") onTemplate(files, m.res.data, hash, saved);
@@ -736,10 +759,26 @@ function onDocument(name, data) {
   $("open-survey").addEventListener("click", openSurvey);
   $("title-preview").textContent = data["자동 제목"] ? `예: ${data["자동 제목"]}` : "";
   $("header-preview").textContent = data["자동 머리말"] ? `예: ${data["자동 머리말"]}` : "";
+  setTemplateHeaderOption(data);
   const big = data["큰 표"] || { "수": 0 };
   $("q-split").hidden = !(big["수"] > 0);  // 한 쪽보다 길 수 있는 표가 있을 때만 묻는다
   $("split-count").textContent = big["어림"] === false ? "(표가 있어 미리 여쭙니다)" : `(한 쪽을 넘는 표 ${big["수"]}개)`;
   openSurvey();
+}
+/* 4-2 '양식에 있는 머리말 그대로': 양식 머리말(쪽 종류별)을 미리 보여 준다. 양식에 머리말이 없으면 고를 수 없게 */
+function setTemplateHeaderOption(doc) {
+  const s = (state.template && state.template.s) || {};
+  const heads = (s["머리말 쪽"] || []).filter((h) => h["글자"]);
+  const radio = $("header-template");
+  radio.disabled = heads.length === 0;
+  if (radio.disabled && radio.checked) radio.checked = false;
+  $("header-template-preview").textContent = heads.length === 0 ? "양식에 머리말 글자가 없습니다"
+    : heads.length === 1 ? `예: ${heads[0]["글자"]}`
+    : "예: " + heads.map((h) => `${h["쪽"]} '${h["글자"]}'`).join(" · ");
+  const chapters = doc && doc["구성"] ? doc["구성"]["장"] : 0;
+  $("header-template-desc").textContent = chapters > 0
+    ? `양식 머리말을 그대로 쓰고, 장 제목 자리만 문서의 장 제목(장 ${chapters}개)으로 바꿉니다.`
+    : "양식 머리말을 그대로 씁니다(문서에 장이 없어 장 제목 자리도 양식 글자 그대로).";
 }
 function resetDocument() {
   state.document = null;
@@ -792,7 +831,8 @@ function options() {
     "표지": { "만들기": val("title") === "yes", "제목": val("titleMode") === "manual" ? $("title-text").value.trim() : "" },
     "차례": { "만들기": val("toc") === "yes" },
     "쪽번호": { "방식": val("pn"), "시작": val("pn") === "지정" ? +$("pn-start").value : 1 },
-    "머리말": { "만들기": val("header") === "yes", "글자": val("headerMode") === "manual" ? $("header-text").value.trim() : "" },
+    "머리말": { "만들기": val("header") === "yes", "글자": val("headerMode") === "manual" ? $("header-text").value.trim() : "",
+              "방식": { manual: "직접", auto: "자동", template: "양식" }[val("headerMode")] || "자동" },
     "표": { "나누기": $("q-split").hidden ? "" : val("split") },
   };
 }
@@ -808,7 +848,7 @@ form.addEventListener("submit", async (e) => {
     showBusy("양식에 맞게 바꾸는 중…");
     const m = await call("convert", { options: options() });
     hideBusy();
-    if (!m.res.ok) { showError("convert-error", errorText(m.res)); return; }
+    if (!m.res.ok) { showProblem("convert-error", m.res); return; }
     onResult(m.res.data, m.bytes);
   } catch (err) {
     hideBusy();
@@ -845,13 +885,14 @@ function onResult(data, bytes) {
       + (rep ? `(표 머리행은 다음 쪽에도 나옵니다${rep < split.length ? ` — ${rep}개` : ""})` : "") + ".</li>" : "")
     + (frames ? `<li>한 쪽을 넘는 그림 묶음 ${frames}개는 사진과 설명이 갈리지 않게 줄 단위로 다음 쪽에 이어집니다.</li>` : "");
   const ok = data["검증 실패"] === 0;
+  const checked = data["검증 실패"] !== null && data["검증 실패"] !== undefined;
   $("done-card").innerHTML = `
     <p class="done-msg">✓ 완성했습니다</p>
     <p style="margin:0">📥 <b>${esc(data["이름"])}</b> 파일을 <b>다운로드 폴더</b>에 저장했습니다.</p>
     <ul class="notes">
       <li>구성: ${esc(parts)}</li>
       <li>바뀐 번호·기호: ${data["바뀐 글자"]}곳 (글자는 그대로이고, 직접 친 번호를 양식 번호로 바꾼 곳 등)</li>
-      <li>${ok ? "자동 검사: 문서 구조·글자 보존·서식 모두 통과" : `자동 검사에서 ${data["검증 실패"]}곳이 다릅니다 — 한글에서 열어 확인해 주세요`}</li>
+      <li>${ok ? "자동 검사: 문서 구조·글자 보존·서식 모두 통과" : checked ? `자동 검사에서 ${data["검증 실패"]}곳이 다릅니다 — 한글에서 열어 확인해 주세요` : "자동 검사를 끝내지 못했습니다 — 한글에서 열어 확인해 주세요"}</li>
       ${splitNote}${tocNote}${warn}
     </ul>
     <div class="row-actions">

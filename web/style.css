@@ -177,6 +177,15 @@ main.layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items:
 .done-msg { margin: 0 0 8px; font-size: 17px; font-weight: 700; color: var(--ok); }
 .row-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .error { margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--err-soft); color: var(--err); font-size: 14px; }
+.error p { margin: 0 0 6px; }
+.error .err-title { font-weight: 700; font-size: 15px; }
+.error .err-row b { display: inline-block; min-width: 4.5em; margin-right: 6px; }
+.error .err-tips { margin: 0 0 6px; padding-left: 22px; color: var(--ink); }
+.error .err-tips li { margin: 2px 0; }
+.error .err-detail { margin-top: 6px; color: var(--muted); font-size: 13px; }
+.error .err-detail summary { cursor: pointer; }
+.error .err-detail pre { white-space: pre-wrap; word-break: break-all; margin: 6px 0; padding: 8px; border-radius: 8px;
+  background: var(--panel); color: var(--ink); font-size: 12px; }
 .foot { text-align: center; color: var(--muted); font-size: 13px; padding: 0 16px 30px; }
 
 .modal { position: fixed; inset: 0; background: rgba(15, 20, 30, .45); display: grid; place-items: center; padding: 16px; z-index: 20; }

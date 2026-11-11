@@ -8,10 +8,12 @@
 원칙: 입력 파일은 읽기만(작업 폴더에 사본). 원고 글자는 바꾸지 않는다 — 바뀌는 것은 서식과 번호·기호(승인 변경으로 기록).
 """
 import copy
+import functools
 import json
 import re
 import shutil
 import sys
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -22,7 +24,126 @@ from format_transfer import q, local  # noqa: E402
 
 
 class UserError(Exception):
-    """사용자에게 그대로 보여 줄 오류(파일 형식 등)."""
+    """사용자에게 그대로 보여 줄 오류(파일 형식 등). help: 화면에 자세히 보여 줄 안내 — 제목·어디서·이유·해 볼 것·기술 정보."""
+
+    def __init__(self, msg, help=None):  # noqa: A002 — 화면 쪽 이름과 맞춘다
+        super().__init__(msg)
+        self.help = help
+
+
+# ----------------------------------------------------------------------- 친절한 오류 안내
+STAGE = {"양식": "양식을 분석하다가", "문서": "문서를 살펴보다가", "변환": "변환하다가"}
+STAGE_TIP = {
+    "양식": "양식 파일을 한글에서 열어 [파일] → [다른 이름으로 저장] → 파일 형식 'HWPX'로 다시 저장한 뒤 올려 보세요"
+            "(한글이 파일 구조를 정리해 해결되는 경우가 많습니다).",
+    "문서": "바꿀 문서를 한글(워드 문서는 워드)에서 열어 다시 저장한 뒤 올려 보세요(한글이면 형식 'HWPX').",
+    "변환": "같은 양식으로 다른 문서도 안 되는지 확인해 보세요 — 다른 문서는 되면 이 문서의 위 부분이, 다 안 되면 양식이 원인입니다.",
+}
+# 엔진 함수(또는 모듈) → (하던 일, 이렇게 해 보세요). 안쪽 호출부터 처음 걸리는 것을 쓴다.
+TASKS = [
+    (("build_cover", "build_simple_cover", "cover_roles"), "표지를 만들던 중",
+     "설정 1-1 '제목을 만들어 드릴까요?'를 '아니오'로 바꿔 다시 변환해 보세요(표지 없이 만들어집니다)."),
+    (("build_toc", "build_simple_toc", "fit_right_tabs", "toc_roles"), "차례를 만들던 중",
+     "설정 2 '목록을 만들어 드릴까요?'를 '아니오'로 바꿔 다시 변환해 보세요(차례 없이 만들어집니다)."),
+    (("make_hfs", "make_hf", "put_header_text", "set_header_slots", "template_header", "other_header",
+      "put_section_ctrls", "ms_header_text"), "머리말·꼬리말을 넣던 중",
+     "설정 4-2에서 다른 머리말 방식을 고르거나, 4-1을 '아니오'로 바꿔 다시 변환해 보세요."),
+    (("page_numbering",), "쪽 번호를 넣던 중", "설정 3에서 '페이지 번호 필요없음'을 골라 다시 변환해 보세요."),
+    (("secure_tables", "table_plan", "page_height", "table_height", "table_rows", "cell_height"), "큰 표를 쪽에 맞게 나누던 중",
+     "설정 5에서 다른 나누기 방식을 골라 다시 변환해 보세요."),
+    (("build_object", "restyle_table", "restyle_frame", "set_shell", "build_caption", "chapter_caption_pp", "caption_para",
+      "caption_paras", "empty_frame", "bare_picture_frame", "build_lone_caption", "fit_table_width", "table_border_spec",
+      "keep_original", "object_role", "object_fallback", "caption_ts"), "표·그림을 양식 모양으로 바꾸던 중",
+     "원고에서 위 표·그림을 찾아 확인해 보세요 — 표 안의 표, 합쳐진 셀, 글상자가 있으면 잠시 빼고 시도해 볼 수 있습니다."),
+    (("write_package", "build_hpf", "build_rdf", "check_refs", "tostr"), "결과 파일을 저장하던 중", None),
+    (("cmd_verify", "check_text", "check_format", "check_package", "check_tables"), "결과를 자동 검사하던 중", None),
+    (("docx_hwpx",), "워드 문서를 한글 문서로 옮기던 중",
+     "워드에서 문서를 열어 다시 저장하거나, 한글에서 열어 HWPX로 저장한 파일을 올려 보세요."),
+    (("template_profile",), "양식의 표지·차례·본문과 제목·표·그림 모양을 찾던 중",
+     "양식이 한글에서 제대로 열리는지, 본문(제목·본문 글·표·그림 예시)이 들어 있는 보고서인지 확인해 보세요."),
+    (("cmd_analyze", "classify", "caption_info", "table_info", "heading", "number_all", "walk", "merge_sections",
+      "auto_judge", "auto_title", "big_tables"), "문서의 문단·표·그림을 살펴보던 중", None),
+    (("build_body", "heading_example", "doc_title_para", "build_first_para", "build_chapter_para", "setup_chapter_outline",
+      "new_body_section", "attach_carrier", "chapter_outline_textlabel", "drop_typed_number"), "본문 문단을 양식 모양으로 바꾸던 중",
+     "원고에서 위 문단을 찾아 확인해 보세요 — 번호·기호를 직접 친 제목이면 그 줄의 번호를 지우고 시도해 볼 수 있습니다."),
+]
+STEP_FN = {"표지": "build_cover", "차례": "build_toc", "쪽 번호": "page_numbering", "저장": "write_package",
+           "큰 표": "secure_tables", "본문": "build_body", "본문 마무리": "build_body"}  # format_transfer.step() 이름 → TASKS
+ROLE_NAME = {"표 문단": "표", "그림 문단": "그림", "그림 문단(틀 없음)": "그림", "개체 문단(그대로)": "개체",
+             "장 제목": "장 제목", "문서 제목": "문서 제목", "본문": "본문 문단", "빈 줄": "빈 줄"}
+ENGINE = {"format_transfer", "template_profile", "service", "table_fit", "docx_hwpx"}
+
+
+def where_text() -> str:
+    """오류가 난 원고 자리(엔진이 step()으로 남긴 것) → 사람이 찾을 수 있는 말."""
+    now = dict(ft.NOW)
+    if now.get("작업") != "본문" or not now.get("문단"):
+        return ""
+    m = re.match(r"p(\d+)", now["문단"])
+    role = now.get("역할", "")
+    name = ROLE_NAME.get(role) or ("제목" if role.endswith("수준") else "캡션" if "캡션" in role else "문단")
+    text = (now.get("글자") or "").strip()
+    return f"원고 {int(m.group(1)) + 1}번째 문단({name})" + (f" — '{text}'" if text else "")
+
+
+def reason_text(e: BaseException) -> str:
+    s = f"{type(e).__name__}: {e}"
+    if isinstance(e, MemoryError):
+        return "파일이 커서 메모리가 모자랐습니다(그림이 아주 많거나 큰 문서)."
+    if isinstance(e, (zipfile.BadZipFile, UnicodeDecodeError)) or type(e).__name__ == "XMLSyntaxError":
+        return "파일 안의 내용 일부가 손상되었거나 한글이 쓰는 HWPX 형식과 다릅니다."
+    if isinstance(e, KeyError) and "archive" in s:  # zipfile: 'There is no item named ... in the archive'
+        return "HWPX 파일 안에 있어야 할 부분이 빠져 있습니다 — 파일이 손상되었거나 다른 프로그램이 만든 파일입니다."
+    if isinstance(e, (AttributeError, TypeError)) and "NoneType" in s:
+        return "있어야 할 부분(예: 표 제목, 셀, 서식 정보)을 찾지 못했습니다 — 이 파일이 프로그램이 예상한 구조와 조금 다릅니다."
+    if isinstance(e, (KeyError, IndexError, StopIteration)):
+        return "파일 안에서 가리키는 서식 정보(글자·문단 모양, 번호, 스타일 등) 하나를 찾지 못했습니다."
+    if isinstance(e, SystemExit):
+        return f"프로그램이 처리하지 못하는 구조를 만났습니다: {e}"
+    return "이 파일 구조에서 프로그램이 처리하지 못한 부분이 있습니다."
+
+
+def explain(stage: str, e: BaseException) -> dict:
+    """예상하지 못한 오류 → 화면 안내(제목·어디서·이유·해 볼 것·기술 정보)."""
+    frames = [f for f in traceback.extract_tb(e.__traceback__) if Path(f.filename).stem in ENGINE]
+    task = tip = None
+    for f in reversed(frames):
+        for names, t, tp_ in TASKS:
+            if f.name in names or Path(f.filename).stem in names:
+                task, tip = t, tp_
+                break
+        if task:
+            break
+    if task is None:  # 호출 자리로 못 정하면 엔진이 남긴 '지금 하는 일'(step)로
+        fn = STEP_FN.get(ft.NOW.get("작업"))
+        task, tip = next(((t, tp_) for names, t, tp_ in TASKS if fn in names), (None, None))
+    where = where_text() if stage == "변환" else ""
+    damaged = isinstance(e, (zipfile.BadZipFile, UnicodeDecodeError)) or type(e).__name__ == "XMLSyntaxError" \
+        or (isinstance(e, KeyError) and "archive" in str(e))
+    tips = [x for x in ((None if damaged else tip), STAGE_TIP[stage]) if x]  # 파일 손상이면 다시 저장이 먼저
+    tips.append("그래도 안 되면 아래 '오류 정보'를 복사해 알려 주세요 — 어디를 고쳐야 할지 바로 찾을 수 있습니다.")
+    last = frames[-1] if frames else None
+    detail = f"{type(e).__name__}: {e}" + (f"\n위치: {Path(last.filename).name} {last.lineno}행 {last.name}()" if last else "") \
+        + (f"\n원고: {ft.NOW.get('문단')} {ft.NOW.get('역할', '')}" if ft.NOW.get("문단") else "") + f"\n단계: {stage}"
+    return {"제목": f"{STAGE[stage]} 문제가 생겼습니다" + (f" — {task}" if task else ""), "어디서": where,
+            "이유": reason_text(e), "해 볼 것": tips, "기술 정보": detail}
+
+
+def friendly(stage: str):
+    """서비스 함수에서 예상하지 못한 오류가 나면 UserError(친절한 안내)로 바꾼다 — 화면·명령줄이 같이 쓴다."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrap(*a, **k):
+            ft.step(stage)
+            try:
+                return fn(*a, **k)
+            except UserError:
+                raise
+            except (Exception, SystemExit) as e:  # noqa: BLE001
+                h = explain(stage, e)
+                raise UserError(h["제목"] + (f" ({h['어디서']})" if h["어디서"] else ""), help=h) from e
+        return wrap
+    return deco
 
 
 DEFAULTS = {
@@ -51,6 +172,7 @@ def check_ext(path, what):
 
 # ======================================================================= 1. 양식
 
+@friendly("양식")
 def analyze_template(src, work) -> dict:
     """양식 파일 하나(src) 또는 여러 개(목록 — 앞표지·목차·본문 스타일·표 그림 양식처럼 나뉜 회사 양식)를 분석한다."""
     work = Path(work)
@@ -246,6 +368,7 @@ def auto_title(rows, paras, stem: str) -> str:
     return re.sub(r"\s{2,}", " ", s).strip() or "보고서"
 
 
+@friendly("문서")
 def inspect_document(src, work) -> dict:
     work = Path(work)
     check_ext(src, "문서")
@@ -340,17 +463,20 @@ def decisions_from(options: dict, st: dict, prof: dict) -> dict:
     else:
         D["쪽 번호"] = {"제목부터": "제목부터", "없음": "없음"}.get(how, "본문부터")
     hd = options.get("머리말", {})
-    if hd.get("만들기", True):
+    if not hd.get("만들기", True):
+        D["머리말 만들기"] = False
+    elif hd.get("방식") == "양식":  # 4-2 '양식에 있는 머리말 그대로' — 장 제목 칸만 원고 장 제목으로(장이 없으면 양식 글자 그대로)
+        D["머리말글자"] = "양식"
+    else:  # 직접 작성 / 본문 분석 자동(글자를 비우면 자동 제목)
         D["머리말글자"] = "지정"
         D["머리말 내용"] = (hd.get("글자") or "").strip() or title
-    else:
-        D["머리말 만들기"] = False
     split = options.get("표", {}).get("나누기")  # 설문 5: 한쪽보다 긴 표 — "나눔"(쪽 경계에서 나눔) / "셀 단위로 나눔"
     if split in ft.tf.PAGE_BREAK:
         D["표 나누기"] = split
     return D
 
 
+@friendly("변환")
 def convert(work, options: dict) -> dict:
     work = Path(work)
     st = json.loads((work / "상태.json").read_text(encoding="utf-8"))
@@ -364,9 +490,14 @@ def convert(work, options: dict) -> dict:
                 f.unlink()
     out_dir.mkdir(parents=True, exist_ok=True)
     ft.cmd_apply(R)
-    fails = ft.cmd_verify(R)
+    try:
+        fails = ft.cmd_verify(R)
+        check_note = []
+    except Exception as e:  # noqa: BLE001 — 검사가 멈춰도 만든 결과 파일은 준다
+        fails = None
+        check_note = [f"자동 검사를 끝내지 못했습니다({type(e).__name__}) — 결과 파일은 만들었으니 한글에서 열어 확인해 주세요."]
     log = R.f("적용로그.md").read_text(encoding="utf-8")
-    warns = [re.sub(r"^⚠\s*(p\d+(>\S+)?\s+)?", "", x[2:].strip()) for x in log.splitlines() if x.startswith("- ⚠")]
+    warns = check_note + [re.sub(r"^⚠\s*(p\d+(>\S+)?\s+)?", "", x[2:].strip()) for x in log.splitlines() if x.startswith("- ⚠")]
     made = json.loads(R.f("결과구성.json").read_text(encoding="utf-8"))
     ap = json.loads(R.f("승인변경.json").read_text(encoding="utf-8"))
     split = json.loads(R.f("표나눔.json").read_text(encoding="utf-8"))
@@ -387,8 +518,9 @@ USAGE = """사용:
   python3 service.py convert <작업 폴더> '<설문 답 JSON>'               # 3단계: 결과 .hwpx + 검증
   python3 service.py <양식> <원고> <작업 폴더> ['<설문 답 JSON>']        # 한 번에
 설문 답 JSON: {"표지":{"만들기":true,"제목":""},"차례":{"만들기":true},"쪽번호":{"방식":"본문부터","시작":1},
-              "머리말":{"만들기":true,"글자":""},"표":{"나누기":"나눔"}}
+              "머리말":{"만들기":true,"글자":"","방식":"자동"},"표":{"나누기":"나눔"}}
   쪽번호 방식: 제목부터 / 본문부터 / 없음 / 지정(시작 = 본문 첫 쪽 번호). 제목·글자를 비우면 자동(원고에서 뽑은 제목).
+  머리말 방식: 직접(글자) / 자동(원고에서 뽑은 제목) / 양식(양식 머리말 그대로 — 장 제목 칸만 원고 장 제목, 장이 없으면 양식 글자).
   표 나누기: 한 쪽을 넘는 표가 있을 때(inspect의 '큰 표' 수 > 0)만 — "나눔"(쪽 경계에서 나눔) / "셀 단위로 나눔"."""
 
 
@@ -407,7 +539,7 @@ def cli(a) -> int:
             else:
                 out = None
     except UserError as e:
-        print(json.dumps({"사용자에게 알릴 것": str(e)}, ensure_ascii=False))
+        print(json.dumps({"사용자에게 알릴 것": str(e), **({"도움말": e.help} if e.help else {})}, ensure_ascii=False, indent=1))
         return 1
     if out is None:
         print(USAGE)
