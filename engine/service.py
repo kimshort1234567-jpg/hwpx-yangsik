@@ -151,6 +151,7 @@ DEFAULTS = {
     "장마다 새 쪽": True, "장마다 쪽 번호 새로": False, "캡션 직접 번호 삭제": True, "캡션 앞뒤 공백 삭제": False,
     "캡션 안 본문": "꺼냄", "제목 직접 번호 삭제": True, "개체 없는 캡션": "빈 틀", "인라인 개체 살림": True,
     "줄 나눔": "글자",  # 모든 문단 모양 줄 나눔 기준 한글·영어 단위 '글자'(사용자 결정 2026-11-04)
+    "본문 앞 빈칸 삭제": True,  # 본문 문단 앞에 친 빈칸·탭은 지우고 들여쓰기는 양식 모양으로(사용자 결정 2026-11-11)
 }
 SENTENCE_END = re.compile(r"(다|요|음|함|임|됨|것)\s*[.。]?\s*$")
 TYPED_HEAD_NO_SPACE = re.compile(r"^\s*(\d{1,2})\.(?=\S)(?!\d)")  # '8.속초' 처럼 번호 뒤 빈칸이 없는 것
@@ -566,7 +567,8 @@ def convert(work, options: dict) -> dict:
     ap = json.loads(R.f("승인변경.json").read_text(encoding="utf-8"))
     split = json.loads(R.f("표나눔.json").read_text(encoding="utf-8"))
     return {"파일": str(R.out), "이름": R.out.name, "검증 실패": fails, "구성": made, "알림": warns[:20],
-            "바뀐 글자": len(ap), "표 나눔": split, "설정": D}
+            "바뀐 글자": sum(1 for a in ap if a.get("종류") != "빈칸"),
+            "지운 앞 빈칸": sum(1 for a in ap if a.get("종류") == "빈칸"), "표 나눔": split, "설정": D}
 
 
 def run_all(template, document, work, options) -> dict:
