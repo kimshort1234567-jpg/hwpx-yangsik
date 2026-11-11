@@ -1215,6 +1215,8 @@ class Ctx:
         self.toc = Importer(self.dst, self.tocp, self.bins, recolor=(self.D.get("글자색", "검정") == "검정")) \
             if self.tocp is not None else None
         self.log, self.toc_entries, self.toc_anchor, self.out_roles, self.approved = [], [], {}, [], []
+        self.toc_target = {}  # 차례 항목 번호 → 결과의 대상(제목 hp:p 또는 표·그림 개체) — 쪽 번호 상호 참조용
+        self.bodies, self.toc_ids = None, None
         if self.dst.line_break:
             self.log.append("줄 나눔 기준: 모든 문단 모양을 한글 단위 '글자'·영어 단위 '글자'로(결정 '줄 나눔' — "
                             "긴 경로·주소 때문에 양쪽 정렬한 줄의 낱말 사이가 벌어지지 않게)")
@@ -2895,8 +2897,29 @@ def put_roles(ctx: Ctx, info, ent: dict, kind: str):
 OBJECT_ROLES = ("표 문단", "그림 문단", "그림 문단(틀 없음)", "개체 문단(그대로)", "표 캡션(개체 없음)", "그림 캡션(개체 없음)")
 
 
+def new_object(sec, n0: int):
+    """sec의 n0번째 문단부터 새로 넣은 문단들에서 첫 표·그림 개체 — 차례 쪽 번호(상호 참조)가 가리킬 대상."""
+    for p in sec.findall(q("hp:p"))[n0:]:
+        for o in objects(p):
+            if local(o) in ("tbl", "pic"):
+                return o
+    return None
+
+
 def object_role(ctx: Ctx, sec, r, src, role, chap, cap_count):
     """표·그림·개체 문단 하나를 결과에 넣는다(build_body가 부른다 — 실패하면 object_fallback)."""
+    n0 = len(sec.findall(q("hp:p")))
+    k0 = len(ctx.toc_entries)
+    try:
+        object_role_inner(ctx, sec, r, src, role, chap, cap_count)
+    finally:
+        if len(ctx.toc_entries) > k0:  # 이번에 넣은 차례 항목 → 이번에 넣은 개체
+            obj = new_object(sec, n0)
+            if obj is not None:
+                ctx.toc_target[len(ctx.toc_entries) - 1] = obj
+
+
+def object_role_inner(ctx: Ctx, sec, r, src, role, chap, cap_count):
     if role in ("표 문단", "그림 문단"):
         kind = "표" if role.startswith("표") else "그림"
         cap, num, info = build_object(ctx, sec, r, kind, chap, cap_count)
@@ -2920,7 +2943,10 @@ def object_role(ctx: Ctx, sec, r, src, role, chap, cap_count):
         auto = cap_label(num, cap_count[kind], ctx.cap_total[kind])
         check_typed(ctx, r, typed, auto, isinstance(num, InlineNum) or typed_cap_same(typed, chap, cap_count[kind]))
         ctx.toc_entries.append((kind, f"{auto} {cap}"))
-        if kind == "표":  # 캡션이 아래라 긴 표는 캡션 쪽 ≠ 시작 쪽 → 첫 본문 행 글자로 시작 쪽을 찾는다
+        order = info.get("순서", [])
+        title_above = "개체" in order and any(isinstance(x, tuple) and order.index(x) < order.index("개체") for x in order)
+        if kind == "표" and not title_above:  # 캡션이 아래라 긴 표는 캡션 쪽 ≠ 시작 쪽 → 첫 본문 행 글자로 시작 쪽을 찾는다
+            # (제목이 표 위에 따로 있으면 제목 쪽 = 시작 쪽. 첫 행 글자는 앞 표 머리행과 같아 엉뚱한 쪽을 잡는다 — 2026-11-11)
             rows = src.find(f".//{q('hp:tbl')}").findall(q("hp:tr"))
             if len(rows) > 1:
                 ctx.toc_anchor[len(ctx.toc_entries) - 1] = " ".join(
@@ -2993,6 +3019,8 @@ def restore(ctx: Ctx, sec, s: dict, counts):
     del ctx.styled_tbls[s["st"]:], ctx.frame_tbls[s["fr"]:], ctx.tbl_names[s["names"]:]
     for k in [k for k in ctx.toc_anchor if k >= s["toc"]]:
         del ctx.toc_anchor[k]
+    for k in [k for k in ctx.toc_target if k >= s["toc"]]:
+        del ctx.toc_target[k]
     counts.clear()
     counts.update(s["counts"])
     ctx.cap_total = s["total"]
@@ -3062,6 +3090,7 @@ def build_body(ctx: Ctx):
                                + (" + 쪽 번호 1부터" if ctx.D.get("장마다 쪽 번호 새로", False) else ""))
             ctx.out_roles.append({"역할": "장 제목", "원고": r["문단"]})
             ctx.toc_entries.append(("장", label_title))
+            ctx.toc_target[len(ctx.toc_entries) - 1] = sec.findall(q("hp:p"))[-1]  # 방금 넣은 장 제목 문단
             cap_count, blanks = {"표": 0, "그림": 0}, 0
             continue
         if not started and role == "빈 줄":
@@ -3103,6 +3132,7 @@ def build_body(ctx: Ctx):
                 auto = head_text(outline, lv, hcount)
                 check_typed(ctx, r, r.get("지울번호"), auto, typed_value(r.get("지울번호")) in (None, hcount[lv]))
                 ctx.toc_entries.append((role, f"{auto} {plain(flat(segs)).strip()}"))
+                ctx.toc_target[len(ctx.toc_entries) - 1] = np
         elif role in OBJECT_ROLES:
             snap = snapshot(ctx, sec, cap_count)
             try:
@@ -3111,7 +3141,10 @@ def build_body(ctx: Ctx):
                 if ctx.D.get("개체 오류 멈춤"):  # 시험용: 오류를 그대로 보고 싶을 때
                     raise
                 restore(ctx, sec, snap, cap_count)
+                k0 = len(ctx.toc_entries)
                 object_fallback(ctx, sec, r, src, role, e)
+                if len(ctx.toc_entries) > k0 and (obj := new_object(sec, snap["p"])) is not None:
+                    ctx.toc_target[len(ctx.toc_entries) - 1] = obj
         elif role == "문서 제목":
             sec.append(doc_title_para(ctx, src, segs_of(src)))
             ctx.out_roles.append({"역할": "문서 제목", "원고": r["문단"]})
@@ -3309,6 +3342,96 @@ def simple_tab(ctx: Ctx) -> str:
     return ctx.dst.add("tabPr", el)
 
 
+CROSSREF_FIELD_ID = "628650598"  # 한글이 상호 참조 필드에 쓰는 fieldid('%xrf') — 한글 2020 저장본으로 확인
+TOC_REF = {"tbl": ("TARGET_TABLE", 0), "pic": ("TARGET_PICTURE", 1)}  # 대상 종류 번호: 표 0·그림 1·개요 5
+
+
+def id_pool(ctx: Ctx) -> dict:
+    """결과 본문에 쓰인 id 값들(개수)과 새 id를 낼 다음 값."""
+    if ctx.toc_ids is None:
+        used = Counter(el.get("id") for s in ctx.bodies for el in s.iter() if el.get("id"))
+        ctx.toc_ids = {"used": used, "next": 1100000000}
+    return ctx.toc_ids
+
+
+def fresh_id(ctx: Ctx) -> str:
+    """결과 본문에 아직 없는 id 값(제목 문단·표 개체·필드에 새로 줄 것)."""
+    pool = id_pool(ctx)
+    while str(pool["next"]) in pool["used"]:
+        pool["next"] += 1
+    v = str(pool["next"])
+    pool["used"][v] += 1
+    pool["next"] += 1
+    return v
+
+
+def is_outline(ctx: Ctx, p) -> bool:
+    pp = ctx.dst.get("paraPr", p.get("paraPrIDRef"))
+    h = pp.find(q("hh:heading")) if pp is not None else None
+    return h is not None and h.get("type") == "OUTLINE"
+
+
+def toc_page_ref(ctx: Ctx, n: int, page) -> list:
+    """차례 항목 n의 쪽 번호 자리 → 한글이 문서를 열 때 쪽을 계산하는 상호 참조 필드('… 쪽 번호').
+    한글 없이 만드는 웹·채팅에서도 차례 쪽 번호가 채워진다(2026-11-11 사용자 요청).
+    한글 2020으로 확인한 것(2026-11-11): 열 때마다 다시 계산한다(자리 글자가 비었거나 틀려도), 대상은 개요 문단 id(종류 5)·
+    표 개체 id(종류 0, 그림 틀 표도), 시험 11쌍 차례 430항목이 PDF의 실제 쪽과 모두 같았다. Command는 새 한글이 쓰는
+    '?#id;종류;내용;하이퍼링크;0;'(값 5개 — 한글 2020이 쓰는 4개 꼴도 읽음). 개요가 아닌 문단은 '개요' 참조가 맞지 않아 쓰지 않는다.
+    ('상위 버전에서 작성한 문서' 안내는 양식 파일이 더 새 한글로 저장됐을 때 원래 뜨는 것 — 이 필드와 관계없음.)
+    대상이 없거나 맞지 않으면 [](쪽 번호는 글자로)."""
+    el = ctx.toc_target.get(n)
+    if el is None or ctx.bodies is None or not any(el.getroottree().getroot() is s for s in ctx.bodies):
+        return []
+    tag = local(el)
+    if tag == "p":
+        if not is_outline(ctx, el):
+            return []
+        el.set("id", fresh_id(ctx))  # 결과의 제목 문단 id는 대부분 0 — 늘 새로(다른 곳이 가리키지 않음)
+        ref_type, code = "TARGET_OUTLINE", 5
+    elif tag in TOC_REF:
+        used, oid = id_pool(ctx)["used"], el.get("id")
+        if not oid or oid == "0" or used[oid] > 1:  # 양식 예시를 복사해 같은 id인 표가 여럿 — 이 표만 새 id
+            if oid:
+                used[oid] -= 1
+            el.set("id", fresh_id(ctx))
+        ref_type, code = TOC_REF[tag]
+    else:
+        return []
+    target, fid = el.get("id"), fresh_id(ctx)
+    cb = etree.Element(q("hp:ctrl"))
+    fb = etree.SubElement(cb, q("hp:fieldBegin"))
+    for k, v in (("id", fid), ("type", "CROSSREF"), ("name", ""), ("editable", "0"), ("dirty", "1"), ("zorder", "-1"),
+                 ("fieldid", CROSSREF_FIELD_ID)):
+        fb.set(k, v)
+    ps = etree.SubElement(fb, q("hp:parameters"))
+    ps.set("cnt", "8")
+    ps.set("name", "")
+    for tag_, name, val in (("booleanParam", "Fiexde", "1"), ("integerParam", "Prop", "0"),
+                            ("stringParam", "Command", f"?#{target};{code};0;0;0;"),
+                            ("stringParam", "RefPath", f"?#{target};"), ("stringParam", "RefType", ref_type),
+                            ("stringParam", "RefContentType", "OBJECT_TYPE_PAGE"),
+                            ("booleanParam", "RefHyperLink", "false"),
+                            ("stringParam", "RefOpenType", "HWPHYPERLINK_JUMP_CURRENTTAB")):
+        e = etree.SubElement(ps, q("hp:" + tag_))
+        e.set("name", name)
+        e.text = val
+    t = etree.Element(q("hp:t"))
+    t.text = str(page) if page else ""  # 한글이 열 때 다시 채운다 — 한글 경로에서는 찾은 쪽 번호를 미리 적어 둠
+    ce = etree.Element(q("hp:ctrl"))
+    fe = etree.SubElement(ce, q("hp:fieldEnd"))
+    fe.set("beginIDRef", fid)
+    fe.set("fieldid", CROSSREF_FIELD_ID)
+    return [cb, t, ce]
+
+
+def note_toc_refs(ctx: Ctx, n_ref: int, n_all: int, pages):
+    if n_ref:
+        ctx.log.append(f"차례 쪽 번호: {n_ref}/{n_all}개를 상호 참조(쪽 번호)로 — 한글에서 열면 한글이 쪽을 계산해 채움")
+    if n_all - n_ref:
+        ctx.log.append(f"차례 쪽 번호: {n_all - n_ref}개는 글자로({'찾은 쪽 번호' if pages else '빈칸'}) — 개요 제목·표·그림이 아님")
+    ctx.toc_refs = (n_ref, n_all)
+
+
 def build_simple_toc(ctx: Ctx):
     """양식에 차례가 없을 때: 양식 글꼴로 만든 간단한 차례(제목 + 단계별 들여쓰기 + 오른쪽 탭 쪽 번호)."""
     sec = simple_section(ctx)
@@ -3324,19 +3447,25 @@ def build_simple_toc(ctx: Ctx):
         data = json.loads(pf.read_text(encoding="utf-8"))
         if [d["항목"] for d in data] == [t for _, t in ctx.toc_entries]:
             pages = [d.get("쪽") for d in data]
-    rows = [(kind, text, pages[n] if n < len(pages) else None) for n, (kind, text) in enumerate(ctx.toc_entries)]
+    rows = [(kind, text, pages[n] if n < len(pages) else None, n) for n, (kind, text) in enumerate(ctx.toc_entries)]
     rows = [x for x in rows if x[0] not in ("표", "그림")] + [x for x in rows if x[0] == "표"] + \
            [x for x in rows if x[0] == "그림"]
-    seen = set()
-    for kind, text, page in rows:
+    seen, n_ref = set(), 0
+    for kind, text, page, n in rows:
         if kind in ("표", "그림") and kind not in seen:
             seen.add(kind)
             sec.append(set_runs(copy.deepcopy(blank), ctx.tcolor(text_run_cid(blank)), []))
             sec.append(simple_para(ctx, ex_t, f"{kind} 차례", size=14, bold=True, center=True))
         lv = {"장": 0, "표": 0, "그림": 0}.get(kind, int(kind[0]) if kind[0].isdigit() else 1)
-        sec.append(simple_para(ctx, ex_b, text, bold=(kind == "장"), left_pt=lv * 10, tab=tab, tail=str(page) if page else ""))
+        ref = toc_page_ref(ctx, n, page)
+        p = simple_para(ctx, ex_b, text, bold=(kind == "장"), left_pt=lv * 10, tab=tab,
+                        tail="" if ref else (str(page) if page else ""))
+        p.find(q("hp:run")).extend(ref)
+        n_ref += bool(ref)
+        sec.append(p)
     strip_layout(sec)
-    ctx.log.append(f"양식에 차례가 없어 간단한 차례를 만듦({len(rows)}항목, 쪽 번호 {'채움' if pages else '비움'})")
+    ctx.log.append(f"양식에 차례가 없어 간단한 차례를 만듦({len(rows)}항목)")
+    note_toc_refs(ctx, n_ref, len(rows), pages)
     return sec
 
 
@@ -3361,11 +3490,11 @@ def build_toc(ctx: Ctx):
             ctx.log.append(f"차례 쪽 번호: {pf.name}에서 {sum(1 for x in pages if x)}개 채움")
         else:
             ctx.log.append(f"⚠ {pf.name}의 항목이 지금 차례와 달라 쪽 번호를 비움")
-    rows = [(kind, text, pages[n] if n < len(pages) else None) for n, (kind, text) in enumerate(ctx.toc_entries)]
+    rows = [(kind, text, pages[n] if n < len(pages) else None, n) for n, (kind, text) in enumerate(ctx.toc_entries)]
     rows = [x for x in rows if x[0] not in ("표", "그림")] + [x for x in rows if x[0] == "표"] + \
            [x for x in rows if x[0] == "그림"]
-    seen, chaps = set(), 0
-    for kind, text, page in rows:
+    seen, chaps, n_ref, n_all = set(), 0, 0, 0
+    for kind, text, page, n in rows:
         if kind in ("표", "그림") and kind not in seen:
             seen.add(kind)
             sec.append(copy.deepcopy(ex(f"{kind} 차례 제목")))
@@ -3390,14 +3519,18 @@ def build_toc(ctx: Ctx):
             runs[0].remove(t)
         t = etree.SubElement(runs[0], q("hp:t"))
         t.text = text
+        ref = toc_page_ref(ctx, n, page) if tab is not None else []
         if tab is not None:
             tb = copy.deepcopy(tab)
-            tb.tail = str(page) if page else None
+            tb.tail = None if ref else (str(page) if page else None)
             t.append(tb)
+        runs[0].extend(ref)
+        n_ref, n_all = n_ref + bool(ref), n_all + 1
         sec.append(p)
     strip_layout(sec)
     ctx.toc.remap(sec)
     fit_right_tabs(ctx, sec)
+    note_toc_refs(ctx, n_ref, n_all, pages)
     return sec
 
 
@@ -3542,6 +3675,7 @@ def cmd_apply(R: Run):
     step("준비")
     ctx = Ctx(R)
     bodies = build_body(ctx)
+    ctx.bodies, ctx.toc_refs = bodies, (0, 0)  # 차례 쪽 번호 상호 참조가 가리킬 본문(id 겹침 검사)
     # 앞표지·차례: 양식에 그 부분이 있고 결정 '표지 만들기'·'차례 만들기'(기본 true)일 때만
     want_cover, want_toc = ctx.D.get("표지 만들기", True), ctx.D.get("차례 만들기", True)
     step("표지")
@@ -3561,7 +3695,8 @@ def cmd_apply(R: Run):
     for s in front:
         s.find(f".//{q('hp:secPr')}").set("outlineShapeIDRef", oid)
     R.f("결과구성.json").write_text(json.dumps({"앞구역": len(front), "표지": cover is not None, "차례": toc is not None,
-                                              "본문구역": len(bodies)}, ensure_ascii=False), encoding="utf-8")
+                                              "본문구역": len(bodies), "차례 쪽 번호 참조": list(ctx.toc_refs)},
+                                             ensure_ascii=False), encoding="utf-8")
     check_refs(ctx, sections)
     out = write_package(ctx, sections)
     added = ", ".join(f"{k} {v}" for k, v in ctx.dst.added.items() if v)
@@ -3595,7 +3730,6 @@ def snap_extra_windows(pids, png: Path) -> list:
     try:
         import win32gui
         import win32process
-        from PIL import ImageGrab
     except ImportError:
         return []
     found = []
@@ -3603,11 +3737,11 @@ def snap_extra_windows(pids, png: Path) -> list:
     def enum(h, _):
         _, pid = win32process.GetWindowThreadProcessId(h)
         if pid in pids and win32gui.IsWindowVisible(h) and not win32gui.GetWindowText(h).endswith("- 한글"):
-            found.append((win32gui.GetWindowText(h), win32gui.GetWindowRect(h)))
+            found.append((win32gui.GetWindowText(h), h))
         return True
     win32gui.EnumWindows(enum, None)
     if found:
-        ImageGrab.grab(bbox=found[0][1], all_screens=True).save(png)
+        snap_window(found[0][1], png)
     return found
 
 
@@ -3615,36 +3749,101 @@ OPEN_ARG = "versionwarning:false;forceopen:true;suspendpassword:true;lock:false"
 IN_FORMAT = {".hwp": "HWP", ".hwpx": "HWPX", ".docx": "OOXML", ".doc": "MSWORD"}
 
 
+def snap_window(h, png: Path) -> bool:
+    """창 하나의 내용만 그림으로(PrintWindow) — 화면 영역을 찍으면 그 창을 가린 다른 창(사용자 문서)이 찍힌다."""
+    try:
+        import ctypes
+        import win32gui
+        import win32ui
+        from PIL import Image
+        l, t, r, b = win32gui.GetWindowRect(h)
+        hdc = win32gui.GetWindowDC(h)
+        mfc = win32ui.CreateDCFromHandle(hdc)
+        mem = mfc.CreateCompatibleDC()
+        bmp = win32ui.CreateBitmap()
+        bmp.CreateCompatibleBitmap(mfc, r - l, b - t)
+        mem.SelectObject(bmp)
+        ok = ctypes.windll.user32.PrintWindow(h, mem.GetSafeHdc(), 2)
+        info = bmp.GetInfo()
+        if ok:
+            Image.frombuffer("RGB", (info["bmWidth"], info["bmHeight"]), bmp.GetBitmapBits(True), "raw", "BGRX", 0, 1).save(png)
+        win32gui.DeleteObject(bmp.GetHandle())
+        mem.DeleteDC()
+        mfc.DeleteDC()
+        win32gui.ReleaseDC(h, hdc)
+        return bool(ok)
+    except Exception:
+        return False
+
+
+def window_titles(pids) -> list:
+    """한글 프로세스들의 보이는 창 제목(확인할 수 없으면 None)."""
+    try:
+        import win32gui
+        import win32process
+    except ImportError:
+        return None
+    out = []
+
+    def enum(h, _):
+        _, pid = win32process.GetWindowThreadProcessId(h)
+        if pid in pids and win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h):
+            out.append(win32gui.GetWindowText(h))
+        return True
+    win32gui.EnumWindows(enum, None)
+    return out
+
+
+def only_mine(titles, names) -> bool:
+    """문서 창이 모두 빈 문서이거나 이번 작업 파일인가 — 사용자가 연 문서가 이 한글에 들어와 있으면 False."""
+    return titles is not None and all(not t.endswith("- 한글") or t.startswith("빈 문서") or any(n in t for n in names)
+                                      for t in titles)
+
+
+def close_own_docs(hwp, paths) -> list:
+    """이 한글에서 이번 작업 파일만 저장하지 않고 닫는다 → 남은 다른 문서들(있으면 한글을 끄지 않는다).
+    작업 중 사용자가 연 파일이 이 한글로 열릴 수 있다(2026-11-11 실제로 일어남 — 끄면 사용자 문서까지 닫힌다)."""
+    keys = {str(Path(p).resolve()).lower() for p in paths}
+    docs = hwp.XHwpDocuments
+    for i in reversed(range(docs.Count)):
+        d = docs.Item(i)
+        if d.FullName and str(Path(d.FullName).resolve()).lower() in keys:
+            d.SetActive_XHwpDocument()
+            hwp.clear(1)  # 저장하지 않음(원본 그대로)
+    return [docs.Item(i).FullName for i in range(docs.Count) if docs.Item(i).FullName]
+
+
 def hwp_child(src: str, dst: str, fmt_out: str) -> None:
     """(자식 프로세스) 한글로 src를 열어 dst로 저장 — fmt_out 'PDF'(결과 확인) 또는 'HWPX'(.hwp·.docx 변환).
-    대화상자가 뜨면(이번에 띄운 한글 창만) 그림으로 남기고 기본 단추(Enter)를 누른다."""
+    열기·저장하는 동안 뜬 대화상자만(이번에 띄운 한글 창) 그림으로 남기고 기본 단추(Enter)를 누른다.
+    끝나면 이 작업 파일만 닫고, 다른 문서가 이 한글에 열려 있으면 한글을 끄지 않는다."""
     import threading
     from pyhwpx import Hwp
     t0 = time.time()
     before = hwp_pids()
     hwp = Hwp(new=True, visible=True)  # 숨김이면 PDF 저장 실패
     mine = hwp_pids() - before
-    stop, seen = threading.Event(), []
+    stop, busy, seen = threading.Event(), threading.Event(), []
 
     def watch():
         try:
             import win32con
             import win32gui
             import win32process
-            from PIL import ImageGrab
         except ImportError:
             return
         while not stop.is_set():
+            if not busy.is_set():  # 내가 열기·저장하는 동안에만(사용자 문서의 대화상자를 누르지 않게)
+                stop.wait(0.3)
+                continue
+
             def enum(h, _):
                 _, pid = win32process.GetWindowThreadProcessId(h)
                 title = win32gui.GetWindowText(h)
                 if pid in mine and win32gui.IsWindowVisible(h) and title and not title.endswith("- 한글") and h not in seen:
                     seen.append(h)
                     png = Path(dst).with_name(Path(dst).stem + f"_대화상자{len(seen)}.png")
-                    try:
-                        ImageGrab.grab(bbox=win32gui.GetWindowRect(h), all_screens=True).save(png)
-                    except Exception:
-                        pass
+                    snap_window(h, png)
                     win32gui.PostMessage(h, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
                     win32gui.PostMessage(h, win32con.WM_KEYUP, win32con.VK_RETURN, 0)
                     print(f"대화상자 '{title}' → Enter(그림 {png.name})", flush=True)
@@ -3656,6 +3855,7 @@ def hwp_child(src: str, dst: str, fmt_out: str) -> None:
             stop.wait(0.5)
     threading.Thread(target=watch, daemon=True).start()
     try:
+        busy.set()
         fmt_in = IN_FORMAT.get(Path(src).suffix.lower(), "")
         tries = [(fmt_in, OPEN_ARG), ("", ""), (fmt_in, "")] + ([("MSWORD", ""), ("DOCX", "")] if fmt_in == "OOXML" else [])
         for k, (f_in, arg) in enumerate(dict.fromkeys(tries)):
@@ -3667,14 +3867,19 @@ def hwp_child(src: str, dst: str, fmt_out: str) -> None:
             raise SystemExit(f"한글에서 열기 실패: {src} (시도 {list(dict.fromkeys(tries))})")
         pages = hwp.PageCount
         ok = hwp.save_as(dst, format=fmt_out)
+        busy.clear()
         size = Path(dst).stat().st_size if Path(dst).exists() else 0
         print(f"열기 성공, {pages}쪽 → {fmt_out} 저장 {'성공' if ok and size else '실패'} ({size:,} bytes, {time.time() - t0:.1f}초)")
         if not (ok and size):
             raise SystemExit(3)
     finally:
+        busy.clear()
         stop.set()
-        hwp.clear(1)  # 연 문서는 저장하지 않음(원본 그대로)
-        hwp.quit()
+        others = close_own_docs(hwp, [src, dst])
+        if others:
+            print(f"⚠ 이 한글에 다른 문서 {len(others)}개가 열려 있어 한글을 끄지 않음(사용자 문서 보호)", flush=True)
+        else:
+            hwp.quit()
 
 
 def run_hwp_job(src: Path, dst: Path, fmt_out: str, limit=120, tries=3):
@@ -3694,8 +3899,12 @@ def run_hwp_job(src: Path, dst: Path, fmt_out: str, limit=120, tries=3):
             print(f"{attempt}차: {limit:.0f}초 안에 안 끝남. 떠 있던 창: {[w[0] for w in wins]}" + (f" → {png.name}" if wins else ""))
             ok = False
         time.sleep(1.5)
-        for pid in hwp_pids() - before:
-            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        for pid in hwp_pids() - before:  # 이번에 띄운 한글이 남았으면: 이 작업 파일·빈 문서 창뿐일 때만 끈다
+            titles = window_titles({pid})
+            if only_mine(titles, (src.name, dst.name)):
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+            else:
+                print(f"⚠ 남은 한글(pid {pid})에 다른 문서 창이 있어 끄지 않음: {(titles or ['창 확인 불가'])[:3]}")
         if ok:
             return
         time.sleep(3)
@@ -3747,6 +3956,39 @@ def printed_number(page):
             if m:
                 return int(m.group(1))
     return None
+
+
+TOC_LEADER_NUM = re.compile(r"[·.…‥∙ㆍ]{2,}(\d+)$")
+
+
+def toc_printed(pdf: Path, entries) -> list:
+    """PDF 차례 쪽(쪽 번호가 찍히지 않은 앞쪽들)에 실제로 찍힌 항목별 쪽 번호 — 상호 참조를 한글이 채운 값.
+    항목 글자가 끝나는 줄부터 '채움 점선 + 숫자'로 끝나는 첫 줄을 읽는다(긴 항목은 줄이 나뉘어도 이어 찾는다).
+    줄 단위로 읽어야 '…결과 ···1' 다음 줄 '1. 교동도'의 1과 붙어 11로 읽히지 않는다. 못 찾으면 None."""
+    import bisect
+    import pymupdf
+    doc = pymupdf.open(str(pdf))
+    lines = [s for p in doc if printed_number(p) is None for s in (norm(x) for x in p.get_text().splitlines()) if s]
+    starts, flat = [], ""
+    for s in lines:
+        starts.append(len(flat))
+        flat += s
+    out, k = [], 0
+    for ent in entries:
+        key = norm(ent[1])
+        i = flat.find(key, k)
+        if i < 0:
+            out.append(None)
+            continue
+        li, num = bisect.bisect_right(starts, i + len(key) - 1) - 1, None
+        k = i + len(key)
+        for j in range(li, min(li + 3, len(lines))):
+            m = TOC_LEADER_NUM.search(lines[j])
+            if m:
+                num, k = int(m.group(1)), starts[j] + len(lines[j])
+                break
+        out.append(num)
+    return out
 
 
 def toc_pages(pdf: Path, entries) -> list:
@@ -4154,6 +4396,13 @@ def check_pdf(R: Run, n_chapters: int, out_pkg: Pkg = None):
         real = toc_pages(R.pdf, entries)
         diff = [(a["항목"], a["쪽"], b["쪽"]) for a, b in zip(toc, real) if a["쪽"] != b["쪽"]]
         rows.append((f"차례 쪽 번호 {len(toc)}개가 PDF 위치와 같음", not diff and len(toc) == len(real)))
+        # 차례에 실제로 찍힌 숫자(상호 참조를 한글이 채운 값) — 차례는 제목들 → 표 → 그림 순서로 찍힌다
+        order = [i for i, e in enumerate(entries) if e[0] not in ("표", "그림")] + \
+                [i for i, e in enumerate(entries) if e[0] == "표"] + [i for i, e in enumerate(entries) if e[0] == "그림"]
+        shown = dict(zip(order, toc_printed(R.pdf, [entries[i] for i in order])))
+        bad = [(entries[i][1], shown[i], real[i]["쪽"]) for i in order if shown[i] != real[i]["쪽"]]
+        rows.append((f"차례에 찍힌 쪽 번호 {len(order) - len(bad)}/{len(order)}개가 실제 쪽과 같음", not bad))
+        diff += [(a, f"찍힘 {b}", c) for a, b, c in bad]
     else:
         rows.append(("차례 없음(만들지 않음) — 차례 쪽 번호 검사 건너뜀", True))
     # 본문에 찍힌 장 제목(자동 번호 포함) — 머리말 영역 아래 글 묶음에서 찾는다
@@ -4243,8 +4492,13 @@ def cmd_verify(R: Run):
         L += ["", "## 4. PDF(한글에서 열어 PDF로 저장한 결과)", ""] + [f"- {'✅' if ok else '❌'} {n}" for n, ok in pr]
         L += [f"  - {a}: 차례 {b} / 실제 {c}" for a, b, c in pdiff]
     else:
-        L += ["", "## 4. PDF", "", "- ⏭ PDF 없음(한글 없이 만듦) — 쪽 모양 검사를 못 했고 차례의 쪽 번호가 비어 있다. "
-              "한글에서 열어 확인하거나, 한글이 있는 PC에서 `run`으로 다시 만든다."]
+        made = json.loads(R.f("결과구성.json").read_text(encoding="utf-8")) if R.f("결과구성.json").exists() else {}
+        n_ref, n_all = (made.get("차례 쪽 번호 참조") or [0, 0])
+        toc_note = ("" if not made.get("차례") else
+                    " 차례 쪽 번호는 상호 참조라 한글에서 열면 한글이 채운다." if n_all and n_ref == n_all else
+                    f" 차례 쪽 번호 {n_all - n_ref}/{n_all}개는 비어 있다(나머지는 한글에서 열면 채워짐).")
+        L += ["", "## 4. PDF", "", "- ⏭ PDF 없음(한글 없이 만듦) — 쪽 모양 검사를 못 했다." + toc_note +
+              " 한글에서 열어 확인하거나, 한글이 있는 PC에서 `run`으로 다시 만든다."]
     memo = R.f("눈확인메모.md")
     if memo.exists():
         L += ["", memo.read_text(encoding="utf-8").strip()]

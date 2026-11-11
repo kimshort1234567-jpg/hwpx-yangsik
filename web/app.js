@@ -874,7 +874,12 @@ function onResult(data, bytes) {
   const made = data["구성"];
   const parts = [made["표지"] ? "표지" : "", made["차례"] ? "차례" : "", "본문"].filter(Boolean).join(" + ");
   const warn = (data["알림"] || []).map((n) => `<li class="warn">${esc(n)}</li>`).join("");
-  const tocNote = made["차례"] ? `<li>차례의 쪽 번호는 아직 비어 있습니다 — 한글에서 열어 쪽을 확인해 주세요(다음 판에서 채울 예정).</li>` : "";
+  // 차례 쪽 번호: 상호 참조(쪽 번호)라 한글에서 파일을 열면 한글이 쪽을 계산해 채운다 — [참조 개수, 항목 개수]
+  const [nRef, nAll] = made["차례 쪽 번호 참조"] || [0, 0];
+  const tocNote = !made["차례"] ? ""
+    : nAll && nRef === nAll ? `<li>차례 쪽 번호는 한글에서 파일을 열면 자동으로 채워집니다(제목·표·그림의 쪽이 바뀌어도 다시 열면 맞게 바뀝니다).</li>`
+    : nRef ? `<li>차례 쪽 번호는 한글에서 파일을 열면 자동으로 채워집니다. 다만 ${nAll - nRef}개 항목은 비어 있으니 한글에서 확인해 주세요.</li>`
+    : `<li>차례 쪽 번호를 비워 두었습니다 — 한글에서 열어 쪽을 확인해 주세요.</li>`;
   const all = data["표 나눔"] || [];
   const split = all.filter((x) => x["종류"] !== "그림");
   const frames = all.length - split.length;
