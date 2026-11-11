@@ -2672,6 +2672,50 @@ def check_typed(ctx: Ctx, r, typed: str, auto: str, same: bool):
         ctx.log.append(f"⚠ {r['문단']} 원고에 친 번호 '{typed.strip()}'와 결과 자동 번호 '{auto}'가 다름 — 원고 번호를 확인")
 
 
+LEAD_WS = " \t 　"
+SPACE_EL = ("tab", "fwSpace", "nbSpace")  # 글자 안 빈칸 요소(탭·고정폭 빈칸·묶음 빈칸)
+
+
+def trim_lead(items) -> int:
+    """글자 조각들 맨 앞의 빈칸·탭(글자와 빈칸 요소)을 지운다 → 지운 개수. 글자가 아닌 것(각주·개체 등)을 만나면 멈춘다."""
+    n = 0
+    for t in items:
+        if local(t) != "t":
+            return n
+        txt = t.text or ""
+        k = len(txt) - len(txt.lstrip(LEAD_WS))
+        t.text, n = txt[k:], n + k
+        if t.text:
+            return n
+        for c in list(t):
+            if local(c) not in SPACE_EL:
+                return n
+            tail = c.tail or ""
+            t.remove(c)
+            k = len(tail) - len(tail.lstrip(LEAD_WS))
+            t.text, n = tail[k:], n + 1 + k
+            if t.text:
+                return n
+    return n
+
+
+def drop_lead_space(ctx: Ctx, r, segs):
+    """본문 문단 맨 앞에 원고가 직접 친 빈칸·탭을 지운다 — 들여쓰기는 양식 본문 문단 모양(첫 줄 들여쓰기)이 맡는다.
+    2026-11-11 사용자: '소제목 다음 내용은 띄어쓰기 없이' — 원고 '      - …'(빈칸 6개)가 양식 들여쓰기 22pt에 더해져
+    첫 줄만 크게 밀렸다. 승인된 변경으로 기록(결정 '본문 앞 빈칸 삭제', 기본 true)."""
+    if not ctx.D.get("본문 앞 빈칸 삭제", True):
+        return segs
+    s = plain(flat(segs))
+    if not s.strip() or s == s.lstrip(LEAD_WS):
+        return segs
+    out = copy.deepcopy(segs)
+    n = trim_lead(flat(out))
+    if not n:
+        return segs
+    ctx.approved.append({"문단": r["문단"], "내용": f"문단 앞 빈칸 {n}개 삭제(양식 본문 들여쓰기와 겹침)", "종류": "빈칸"})
+    return [(c, ts) for c, ts in out if ts]
+
+
 def drop_typed_number(ctx: Ctx, r, segs):
     """제목·장 제목에 글자로 친 번호(역할매핑 '지울번호')를 뺀다 — 양식 자동 번호와 겹치므로
     (결정 '제목 직접 번호 삭제', 기본 true). 승인된 변경으로 기록. segs: text_segs 결과(글자 조각을 직접 고침)."""
@@ -3113,7 +3157,7 @@ def build_body(ctx: Ctx):
         if role in HEADING_ROLES or role == "본문":
             e = heading_example(ctx, ex, role) if role in HEADING_ROLES else ex[role]
             src_segs = inline_segs(src, ctx.ms) if ctx.D.get("인라인 개체 살림", False) else text_segs(src)
-            segs = drop_typed_number(ctx, r, src_segs) if role in HEADING_ROLES else src_segs
+            segs = drop_typed_number(ctx, r, src_segs) if role in HEADING_ROLES else drop_lead_space(ctx, r, src_segs)
             if r.get("앞기호"):  # 원고 글머리표(문단 모양의 기호)를 글자로 — 양식 본문 모양에는 글머리표가 없으므로
                 t = etree.Element(q("hp:t"))
                 t.text = r["앞기호"]
