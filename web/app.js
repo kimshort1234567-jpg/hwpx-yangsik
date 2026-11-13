@@ -7,6 +7,7 @@ const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.29.5/full/";
 /* ---------------------------------------------------------------- 작업자(Worker) */
 function workerMain() {
   let py = null;
+  let tpaths = null; // 마지막으로 올린 양식 파일 경로(제목·본문 줄을 고쳐 다시 분석할 때 쓴다)
   const post = (msg) => self.postMessage(msg);
   self.onmessage = async (e) => {
     const m = e.data;
@@ -47,10 +48,15 @@ def call(name, args_json):
           return path;
         });
         args = [paths.length === 1 ? paths[0] : paths, "/work"];
+        if (m.type === "template") { tpaths = paths; args.push(m.picks || null); } // picks: 저장해 둔 '고친 줄'
+      } else if (m.type === "repick") {
+        // 같은 양식 파일을 사용자가 고친 제목·본문 줄(picks)로 다시 분석한다(picks가 없으면 자동으로 찾은 대로)
+        if (!tpaths) throw new Error("양식을 먼저 올려 주세요.");
+        args = [tpaths.length === 1 ? tpaths[0] : tpaths, "/work", m.picks || null];
       } else if (m.type === "convert") {
         args = ["/work", m.options];
       }
-      const fn = { template: "analyze_template", document: "inspect_document", convert: "convert" }[m.type];
+      const fn = { template: "analyze_template", repick: "analyze_template", document: "inspect_document", convert: "convert" }[m.type];
       const res = JSON.parse(py.globals.get("call")(fn, JSON.stringify(args)));
       if (res.ok && m.type === "convert") {
         const bytes = py.FS.readFile(res.data["파일"]);
@@ -120,7 +126,7 @@ function openModal(id) { $(id).hidden = false; const f = $(id).querySelector("in
 function closeModal(id) { $(id).hidden = true; }
 document.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => closeModal(b.closest(".modal").id)));
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") ["import-modal", "survey-modal"].forEach((id) => { if (!$(id).hidden) closeModal(id); });
+  if (e.key === "Escape") ["import-modal", "survey-modal", "pick-modal"].forEach((id) => { if (!$(id).hidden) closeModal(id); });
 });
 
 function errorText(res) {
@@ -353,7 +359,10 @@ async function takeFile(kind, input, saved) {
         hash = hs.length === 1 ? hs[0] : "set:" + hs.sort().join("+"); // 묶음은 파일 순서와 상관없이 같은 양식
       }
     }
-    const m = await call(kind, { list }, list.map((x) => x.bytes));
+    // 저장소에 있는 양식이면(목록에서 골랐거나, 같은 파일을 다시 올렸거나) 그때 고쳐 둔 제목·본문 줄(picks)도 함께 쓴다
+    const rec = kind === "template" ? (saved || vault.items.find((v) => v.hash === hash)) : null;
+    const picks = rec && rec.picks ? rec.picks : null;
+    const m = await call(kind, kind === "template" ? { list, picks } : { list }, list.map((x) => x.bytes));
     hideBusy();
     if (!m.res.ok) {
       // 양식 분석이 실패하면 엔진 쪽 양식도 이미 바뀌었으므로 화면의 양식도 비운다(다시 고르게)
@@ -361,7 +370,7 @@ async function takeFile(kind, input, saved) {
       showProblem(errId, m.res);
       return;
     }
-    if (kind === "template") onTemplate(files, m.res.data, hash, saved);
+    if (kind === "template") onTemplate(files, m.res.data, hash, saved, picks);
     else onDocument(files[0].name, m.res.data);
   } catch (err) {
     hideBusy();
@@ -376,21 +385,41 @@ function setName(files, s) { // 저장소에 넣을 때 기본 이름: 파일 �
 }
 
 /* ---------------------------------------------------------------- 1. 양식 */
-function onTemplate(files, data, hash, saved) {
+/* 양식 진단표: 엔진이 검사한 항목(있음·없음, 없을 때 어떻게 처리하는지, 한글에서 넣는 법)을 그대로 보여 준다 */
+function diagHtml(s) {
+  const d = s["진단"];
+  if (!d) return "";
+  const row = (x) => {
+    const ok = x["상태"] === "있음";
+    const cls = ok ? "ok" : x["구분"] === "선택" ? "opt" : "no";
+    let body;
+    if (ok && x["단계"] && x["단계"].length) {
+      body = `<ul class="d-levels">${x["단계"].map((h) => `<li><span class="d-lv">${h["단계"]}단계</span>
+        ${h["번호"] ? `<b>${esc(h["번호"])}</b>` : ""} <span class="d-how">${esc(h["방식"])}</span> ${esc(h["모양"])}
+        <span class="d-ex">‘${esc(h["보기"])}’</span></li>`).join("")}</ul>`;
+    } else if (ok) {
+      body = esc(x["찾은 것"]);
+    } else {
+      body = `<span class="d-miss">양식에 없음</span> ${esc(x["없으면"])}`
+        + (x["고치는 법"] ? `<small class="d-fix">양식에 넣으려면: ${esc(x["고치는 법"])}</small>` : "");
+    }
+    return `<li class="${cls}"><span class="d-mark" aria-hidden="true">${ok ? "✓" : cls === "opt" ? "·" : "!"}</span>
+      <span class="d-name">${esc(x["이름"])}</span><span class="d-text">${body}</span></li>`;
+  };
+  const lack = d["없는 것"] || [];
+  const verdict = lack.length
+    ? `<p class="verdict warn">양식으로 쓸 수 있습니다. 다만 양식에 없는 ${lack.length}가지(${esc(lack.join(", "))})는 아래에 적은 대로 처리합니다.</p>`
+    : `<p class="verdict ok">✓ 양식으로 쓸 수 있습니다. 필요한 모양을 모두 찾았습니다.</p>`;
+  return `${verdict}<ul class="diag">${d["항목"].map(row).join("")}</ul>`;
+}
+
+function onTemplate(files, data, hash, saved, picks) {
   const s = data["요약"];
   const name = setName(files, s);
-  state.template = { name, s, files, hash }; // files는 [+ 양식 저장]·파일 더하기 때 다시 읽는다
+  // files는 [+ 양식 저장]·파일 더하기 때 다시 읽는다. picks: 사용자가 고친 제목·본문 줄(없으면 자동으로 찾은 것)
+  state.template = { name, s, files, hash, picks: picks || null };
   state.document = null;
-  const has = (ok, text) => `<li class="${ok ? "" : "no"}">${ok ? "✓" : "✕"} ${esc(text)}</li>`;
-  const levels = (s["제목 단계"] || []).map((h) => h["번호"]).filter(Boolean).join(" → ");
-  const pn = s["쪽 번호"] ? `쪽 번호 ${s["쪽 번호"]["모양"]}` : "쪽 번호";
-  const chips = [
-    has(s["부분"]["표지"], "표지"), has(s["부분"]["차례"], "차례"), has(!!s["장 제목"], "장 제목"),
-    has((s["제목 단계"] || []).length, "번호 단계" + (levels ? ` ${levels}` : "")), has(!!s["본문"], "본문"),
-    has(!!s["표"], "표"), has(!!s["그림"], "그림"), has(s["머리말"] !== undefined, "머리말"), has(!!s["쪽 번호"], pn),
-  ].join("");
   const notes = (s["알림"] || []).map((n) => `<li>${esc(n)}</li>`).join("");
-  const font = s["본문"] ? `본문 글꼴: ${esc(s["본문"]["글꼴"])} ${s["본문"]["크기"]}pt` : "";
   const tag = saved ? ` <span class="tag" id="tmpl-tag">저장된 양식</span>` : "";
   $("template-card").dataset.saved = saved ? saved.id : "";
   // 여러 파일 양식: 어느 부분을 어느 파일에서 가져왔는지
@@ -407,14 +436,17 @@ function onTemplate(files, data, hash, saved) {
       <span class="file-acts"><button type="button" class="linkbtn" id="tmpl-add">+ 파일 더하기</button>
       <button type="button" class="linkbtn" id="tmpl-change">다른 양식으로 바꾸기</button></span></div>
     ${flist}
-    <ul class="chips">${chips}</ul>
-    <p class="hint" style="margin:6px 0 0">${font}${!s["부분"]["표지"] || !s["부분"]["차례"] ? " · 양식에 없는 표지·차례는 필요하면 간단한 모양으로 만들어 드려요." : ""}</p>
+    ${diagHtml(s)}
+    <div class="row-actions"><button type="button" class="btn small" id="tmpl-pick">제목·본문 줄 고치기</button>
+      <span class="pick-state">${picks ? "직접 고른 줄을 쓰는 중" : "제목이나 본문을 잘못 알아봤으면 여기서 고칠 수 있습니다"}</span></div>
     ${notes ? `<ul class="notes">${notes}</ul>` : ""}`;
   $("template-card").hidden = false;
   $("drop-template").hidden = true;
+  $("template-guide").hidden = true;
   $("step1").classList.add("done");
   $("tmpl-change").addEventListener("click", resetTemplate);
   $("tmpl-add").addEventListener("click", () => { state.kind = "template-add"; openImport(); });
+  $("tmpl-pick").addEventListener("click", openPick);
   lock("step2", false);
   resetDocument();
   syncVault();
@@ -424,11 +456,93 @@ function resetTemplate() {
   state.template = null;
   $("template-card").hidden = true;
   $("drop-template").hidden = false;
+  $("template-guide").hidden = false;
   $("step1").classList.remove("done");
   lock("step2", true);
   resetDocument();
   syncVault();
 }
+
+/* 제목·본문 줄 고치기: 엔진이 양식에서 찾은 줄(후보)마다 무엇으로 쓸지 고른다 → 같은 양식을 그 선택으로 다시 분석 */
+const PICK_OPTS = [["", "쓰지 않음"], ["본문", "본문"], ["h1", "제목 1단계"], ["h2", "제목 2단계"], ["h3", "제목 3단계"],
+  ["h4", "제목 4단계"], ["h5", "제목 5단계"]];
+const HOW = { "자동": "자동 번호", "글자": "직접 친 번호·기호", "없음": "번호 없음" };
+function pickValue(role) { return /^[1-5]수준$/.test(role) ? "h" + role[0] : role === "본문" ? "본문" : ""; }
+function openPick() {
+  const t = state.template;
+  if (!t) return;
+  const cands = t.s["후보"] || [];
+  $("pick-list").innerHTML = cands.map((c) => {
+    const meta = [`${c["글꼴"]} ${c["크기"]}pt${c["굵게"] ? " 굵게" : ""}`,
+      c["방식"] === "없음" ? HOW["없음"] : `${HOW[c["방식"]] || ""} ${c["번호"]}`.trim(),
+      c["수"] > 1 ? `양식에 ${c["수"]}줄` : ""].filter(Boolean).join(" · ");
+    const ctrl = c["역할"] === "장 제목" ? `<span class="pick-fixed">장 제목(큰 제목)</span>`
+      : `<select data-ref="${esc(c["문단"])}" data-was="${pickValue(c["역할"])}" aria-label="‘${esc(c["보기"])}’ 줄을 무엇으로 쓸지">
+          ${PICK_OPTS.map(([v, label]) => `<option value="${v}"${v === pickValue(c["역할"]) ? " selected" : ""}>${label}</option>`).join("")}</select>`;
+    return `<li class="pick-row"><div class="pick-text"><span class="pick-sample">‘${esc(c["보기"])}’</span>
+      <span class="pick-meta">${esc(meta)}</span></div>${ctrl}</li>`;
+  }).join("") || `<li class="pick-row">고를 수 있는 줄이 없습니다.</li>`;
+  $("pick-auto").hidden = !t.picks;
+  syncPick();
+  openModal("pick-modal");
+}
+function pickState() {
+  const sel = [...$("pick-list").querySelectorAll("select")];
+  const body = sel.filter((x) => x.value === "본문");
+  const heads = sel.filter((x) => x.value.startsWith("h")).sort((a, b) => a.value.localeCompare(b.value));
+  const levels = heads.map((x) => +x.value[1]);
+  const dup = levels.find((v, i) => levels.indexOf(v) !== i);
+  const moved = (x) => x.value !== x.dataset.was;
+  const headChanged = sel.some((x) => moved(x) && (x.value.startsWith("h") || x.dataset.was.startsWith("h")));
+  const bodyChanged = sel.some((x) => moved(x) && (x.value === "본문" || x.dataset.was === "본문"));
+  let need = "";
+  let note = "";
+  if (body.length === 0) need = "본문으로 쓸 줄을 하나 골라 주세요.";
+  else if (body.length > 1) need = "본문은 한 줄만 고를 수 있습니다.";
+  else if (dup) need = `제목 ${dup}단계를 두 줄에 골랐습니다 — 한 줄만 골라 주세요.`;
+  else if (levels.some((v, i) => v !== i + 1)) note = `제목은 빈 단계 없이 차례로 씁니다 — 고르신 ${levels.join("·")}단계를 ${levels.map((_, i) => i + 1).join("·")}단계로 맞춥니다.`;
+  // 바꾼 것만 보낸다(앞서 고쳐 둔 것은 그대로 둔다) — 제목 줄(1단계부터 차례로)과 본문 줄
+  const picks = { ...((state.template && state.template.picks) || {}) };
+  if (headChanged) picks["제목"] = heads.map((x) => x.dataset.ref);
+  if (bodyChanged && body.length) picks["본문"] = body[0].dataset.ref;
+  return { need, note, changed: headChanged || bodyChanged, picks };
+}
+function syncPick() {
+  const st = pickState();
+  $("pick-need").textContent = st.need || st.note;
+  $("pick-need").classList.toggle("info", !st.need && !!st.note);
+  $("pick-apply").disabled = !!st.need;
+}
+$("pick-list").addEventListener("change", syncPick);
+async function repick(picks) {
+  const t = state.template;
+  if (!t) return;
+  closeModal("pick-modal");
+  showError("template-error", "");
+  try {
+    await waitEngine();
+    showBusy("고르신 줄로 양식을 다시 살펴보는 중…");
+    const m = await call("repick", { picks });
+    hideBusy();
+    if (!m.res.ok) { showProblem("template-error", m.res); return; }
+    const hit = savedNow();
+    if (hit) { // 저장해 둔 양식이면 고친 줄도 함께 기억해 다음에도 그대로 쓴다
+      try { await store.patch(hit.id, { picks }); hit.picks = picks; announce(); } catch (err) { console.warn("고친 줄을 저장하지 못함:", err); }
+    }
+    onTemplate(t.files, m.res.data, t.hash, hit, picks);
+  } catch (err) {
+    hideBusy();
+    showError("template-error", String(err.message || err));
+  }
+}
+$("pick-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const st = pickState();
+  if (st.need) return;
+  if (!st.changed) { closeModal("pick-modal"); return; } // 바꾼 것이 없으면 그대로
+  repick(st.picks);
+});
+$("pick-auto").addEventListener("click", () => repick(null));
 
 /* ---------------------------------------------------------------- 양식 저장소
    [+ 양식 저장]을 누른 양식을 이 브라우저의 저장 공간(IndexedDB)에 보관해 두고, 다음에 목록에서 눌러 바로 쓴다.
@@ -484,6 +598,11 @@ const store = (() => {
       const s = t.objectStore("meta");
       const r = s.get(id);
       r.onsuccess = () => { if (r.result) s.put({ ...r.result, name }); };
+    }),
+    patch: (id, fields) => run("meta", "readwrite", (t) => { // 목록 항목에 값 덧붙이기(예: 고친 제목·본문 줄 picks)
+      const s = t.objectStore("meta");
+      const r = s.get(id);
+      r.onsuccess = () => { if (r.result) s.put({ ...r.result, ...fields }); };
     }),
     remove: (id) => run(["meta", "files"], "readwrite", (t) => {
       t.objectStore("meta").delete(id);
@@ -628,7 +747,7 @@ $("save-template").addEventListener("click", async () => {
       // 파일 하나는 예전처럼 ArrayBuffer 하나로, 여러 개(묶음)는 배열로 보관한다
       rec = await store.add({ name: uniqueName(t.name), fileName: t.files[0].name,
         files: t.files.map((f) => ({ name: f.name, size: f.size })), size: bufs.reduce((n, b) => n + b.byteLength, 0),
-        hash: t.hash, savedAt: Date.now() }, bufs.length === 1 ? bufs[0] : bufs);
+        hash: t.hash, savedAt: Date.now(), picks: t.picks || null }, bufs.length === 1 ? bufs[0] : bufs);
       vault.items.push(rec);
       keepStorage();
       announce();
@@ -747,7 +866,10 @@ loadVault();
 function onDocument(name, data) {
   state.document = { name, data };
   const c = data["구성"];
-  const notes = (data["알림"] || []).map((n) => `<li>${esc(n)}</li>`).join("");
+  const asks = data["확인"] || [];
+  const notes = (data["알림"] || []).map((n) => `<li>${esc(n)}</li>`).join("")
+    + (asks.length ? `<li class="warn">문서에는 있는데 양식에 그 모양이 없는 것이 ${asks.length}가지 있습니다(${esc(asks.map((a) => a["키"]).join(", "))})
+        — 변환 설정에서 어떻게 할지 여쭤봅니다.</li>` : "");
   $("document-card").innerHTML = `
     <div class="file"><span>📝 <b>${esc(name)}</b></span><button type="button" class="linkbtn" id="doc-change">다른 문서로 바꾸기</button></div>
     <ul class="chips"><li>장 ${c["장"]}</li><li>제목 ${c["제목"]}</li><li>본문 ${c["본문"]}</li><li>표 ${c["표"]}</li><li>그림 ${c["그림"]}</li></ul>
@@ -760,10 +882,36 @@ function onDocument(name, data) {
   $("title-preview").textContent = data["자동 제목"] ? `예: ${data["자동 제목"]}` : "";
   $("header-preview").textContent = data["자동 머리말"] ? `예: ${data["자동 머리말"]}` : "";
   setTemplateHeaderOption(data);
+  syncTemplateQuestions();
   const big = data["큰 표"] || { "수": 0 };
   $("q-split").hidden = !(big["수"] > 0);  // 한 쪽보다 길 수 있는 표가 있을 때만 묻는다
   $("split-count").textContent = big["어림"] === false ? "(표가 있어 미리 여쭙니다)" : `(한 쪽을 넘는 표 ${big["수"]}개)`;
+  renderExtra(asks);
   openSurvey();
+}
+/* 양식에 쪽 번호·머리말이 아예 없으면 그 질문은 묻지 않는다 — 만들 자리가 없는데 묻고서 안 만드는 일이 없게 */
+function syncTemplateQuestions() {
+  const s = (state.template && state.template.s) || {};
+  const noHeader = s["머리말"] === undefined;
+  const noPage = !s["쪽 번호"] && noHeader && s["꼬리말"] === undefined;
+  $("q-header").hidden = noHeader;
+  $("q-pn").hidden = noPage;
+  const skipped = [noPage ? "쪽 번호" : "", noHeader ? "머리말" : ""].filter(Boolean);
+  $("q-skipped").hidden = !skipped.length;
+  $("q-skipped").textContent = skipped.length
+    ? `양식에 ${skipped.join("·")}${skipped[skipped.length - 1] === "머리말" ? "이" : "가"} 없어 그 질문은 건너뜁니다(${skipped.join("·")} 없이 만듭니다).` : "";
+}
+/* 문서에는 있는데 양식에 그 모양이 없는 것(엔진이 만든 질문 '확인')을 설문 끝에 덧붙인다. 답은 options()의 '확인' {키: 값} */
+function renderExtra(asks) {
+  const first = $("q-split").hidden ? 5 : 6;
+  $("q-extra").innerHTML = asks.map((a, i) => {
+    const opts = a["선택"].map((c) => `<label><input type="radio" name="x${i}" value="${esc(c["값"])}"> ${esc(c["글"])}${
+      c["값"] === a["기본"] ? ' <span class="rec">추천</span>' : ""}
+      <span class="opt-desc">${esc(c["설명"] || "")}</span></label>`).join("");
+    return `<fieldset class="extra" data-key="${esc(a["키"])}" data-no="${first + i}">
+      <legend>${first + i}. ${esc(a["키"])} <small>(양식에 없는 모양)</small></legend>
+      <p class="q-text">${esc(a["질문"])}</p><div class="opts col">${opts}</div></fieldset>`;
+  }).join("");
 }
 /* 4-2 '양식에 있는 머리말 그대로': 양식 머리말(쪽 종류별)을 미리 보여 준다. 양식에 머리말이 없으면 고를 수 없게 */
 function setTemplateHeaderOption(doc) {
@@ -787,6 +935,7 @@ function resetDocument() {
   $("drop-document").hidden = false;
   $("step2").classList.remove("done");
   $("done-card").hidden = true;
+  $("q-extra").innerHTML = "";
   showError("document-error", "");
   showError("convert-error", "");
   lock("step3", true);
@@ -807,14 +956,17 @@ function syncSurvey() {
     else if (val("titleMode") === "manual" && !$("title-text").value.trim()) need.push("1-2 제목 글자");
   }
   if (!val("toc")) need.push("2");
-  if (!val("pn")) need.push("3");
+  if ($("q-pn").hidden) { /* 양식에 쪽 번호 자리가 없음 — 묻지 않는다 */ }
+  else if (!val("pn")) need.push("3");
   else if (val("pn") === "지정" && !(+$("pn-start").value >= 1)) need.push("3 시작 번호");
-  if (!val("header")) need.push("4-1");
+  if ($("q-header").hidden) { /* 양식에 머리말이 없음 — 묻지 않는다 */ }
+  else if (!val("header")) need.push("4-1");
   else if (val("header") === "yes") {
     if (!val("headerMode")) need.push("4-2");
     else if (val("headerMode") === "manual" && !$("header-text").value.trim()) need.push("4-2 머리말 글자");
   }
   if (!$("q-split").hidden && !val("split")) need.push("5");
+  $("q-extra").querySelectorAll("fieldset").forEach((f) => { if (!f.querySelector("input:checked")) need.push(f.dataset.no); });
   $("survey-need").textContent = need.length ? `아직 답하지 않은 질문: ${need.join(", ")}` : "";
   $("convert-btn").disabled = need.length > 0;
 }
@@ -830,10 +982,13 @@ function options() {
   return {
     "표지": { "만들기": val("title") === "yes", "제목": val("titleMode") === "manual" ? $("title-text").value.trim() : "" },
     "차례": { "만들기": val("toc") === "yes" },
-    "쪽번호": { "방식": val("pn"), "시작": val("pn") === "지정" ? +$("pn-start").value : 1 },
-    "머리말": { "만들기": val("header") === "yes", "글자": val("headerMode") === "manual" ? $("header-text").value.trim() : "",
+    "쪽번호": { "방식": $("q-pn").hidden ? "없음" : val("pn"), "시작": val("pn") === "지정" ? +$("pn-start").value : 1 },
+    "머리말": { "만들기": !$("q-header").hidden && val("header") === "yes",
+              "글자": val("headerMode") === "manual" ? $("header-text").value.trim() : "",
               "방식": { manual: "직접", auto: "자동", template: "양식" }[val("headerMode")] || "자동" },
     "표": { "나누기": $("q-split").hidden ? "" : val("split") },
+    "확인": Object.fromEntries([...$("q-extra").querySelectorAll("fieldset")]
+      .map((f) => [f.dataset.key, (f.querySelector("input:checked") || {}).value || ""]).filter(([, v]) => v)),
   };
 }
 
