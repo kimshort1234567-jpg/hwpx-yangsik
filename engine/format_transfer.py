@@ -30,10 +30,14 @@
   원고 글자색 ("살림" — 원고에서 검정이 아닌 색 글자(자리표시 등)는 결과에서도 그 색. "검정"이면 모두 양식 글자색 — 사용자 결정 2026-10-19),
   줄 나눔 ("글자" — 결과의 모든 문단 모양을 '줄 나눔 기준' 한글 단위 '글자'·영어 단위 '글자'로. 어절·단어 단위면 긴 경로·주소가
     통째로 다음 줄로 넘어가 양쪽 정렬한 윗줄의 낱말 사이가 크게 벌어진다. "양식"이면 양식·원고 값 그대로 — 사용자 결정 2026-11-04)
+  제목 모양 ("본문 굵게" — 양식에 제목 예시가 하나도 없을 때 문서 제목을 양식 본문 글꼴로 굵게. "원고"면 원래 모양 그대로),
+  제목 번호 (양식 제목에 번호가 없으면 "둠" — 문서 번호를 그대로(자동 번호는 글자로), 양식 제목이 기호('□')면 "양식" — 기호로.
+    "양식"/"둠"을 적으면 두 경우 모두 그 값. 양식이 번호를 직접 친 제목('1.'·'가.'·'1.1')이면 늘 같은 모양의 번호를 글자로 넣는다 — 2026-11-12)
   머리말: 원고 머리말이 한 칸에 '사업명 | 장 제목'(탭 또는 '|')이면 양식의 두 칸(사업명 ⇥ 장 제목)으로 나눠 넣는다(승인 변경으로 기록).
     원고 머리말이 없거나 공백뿐이면 '사업명 ⇥ 장 제목' — 머리말 사업명 ("양식" — "비움"이면 사업명 칸을 비움, 2026-10-26).
 
 역할판단 파일에서 쓸 수 있는 것(문단마다): 역할, 근거, 붙일곳·캡션바꿈(캡션), 번호(장 제목 '제N장'),
+  번호값(제목으로 내린 장 제목의 원고 장 번호 — 그 값부터 센다: 제4장 → '4.'),
   지울번호(없으면 제목으로 정한 문단의 친 번호·기호·앞 공백을 자동으로), 캡션추가(캡션 없는 표·그림에 새로 달 글자 — 사용자 승인),
   역할 "그림 문단(틀 없음)"(틀 없이 놓인 그림 → 양식 그림 틀 안, 캡션 없음).
 
@@ -94,8 +98,8 @@ HEADING_ROLES = ("1수준", "2수준", "3수준", "4수준", "5수준")
 TEMPLATE_NUM = {1: "1.", 2: "(1)", 3: "1)", 4: "가.", 5: "(가)"}
 TYPED_CAP = re.compile(r"^\s*<\s*(그림|표)\s*(\d+)?\s*(?:-\s*(\d+)\s*)?>\s*")  # 글자로 친 캡션 번호('<표 1-2>'·'<표 1>'·'< 표 >')
 CONT_WORD = re.compile(r"[(（]\s*계\s*속\s*[)）]")  # 이어지는 표·그림의 제목('… (계속)') — 번호를 늘리지 않는다
-TYPED_HEAD = re.compile(r"^\s*(?:\(\d+\)|\d+\)|\d+\.|\([가-힣]\)|[가-힣]\)|[①-⑳]|[Ⅰ-Ⅻ]\.|제\s*\d+\s*절|"
-                        r"[○●◦□■◇◆▶▷►•·ㅇ])\s*")  # 제목으로 정한 문단의 친 번호·기호
+TYPED_HEAD = re.compile(r"^\s*(?:\(\d+\)|\d+\)|\d+\.|\([가-힣]\)|[가-힣]\)|[가나다라마바사아자차카타파하]\.(?=\s)|[①-⑳]|[Ⅰ-Ⅻ]\.|"
+                        r"제\s*\d+\s*절|[○●◦□■◇◆▶▷►•·ㅇ])\s*")  # 제목으로 정한 문단의 친 번호·기호('가.'는 뒤에 빈칸이 있을 때만)
 TYPED_CHAPTER = re.compile(r"^\s*제\s*(\d+)\s*장\s*")  # 글자로 친 장 번호(번호 모양 없는 개요 1수준 문단)
 HEADER_SEP = re.compile(r"\t|\s*\|\s*")  # 머리말 '사업명 | 장 제목'의 구분(탭 또는 세로줄)
 TYPED = [  # 글자로 친 번호·기호(분석용). 여러 단 번호('2-1)'·'1.1')는 multi_prefix가 먼저 본다
@@ -143,6 +147,69 @@ def multi_parent_shape(shape: str):
     parts = core.split("-" if "-" in core else ".")
     sep = "-" if "-" in core else "."
     return sep.join(parts[:-1]) + close if len(parts) > 2 else parts[0] + (close or ".")
+
+
+SENTENCE_END = re.compile(r"(다|요|음|함|임|됨|것)\s*[.。]?\s*$")  # 문장 끝에 오는 글자(is_sentence가 명사와 가른다)
+# 같은 글자로 끝나지만 문장이 아닌 명사들('1. 개요'·'추진 필요'·'다음'·'기관별 책임'이 본문으로 빠지지 않게)
+NOUN_END = {"함": ("포함", "명함", "군함", "보관함", "사서함", "서류함", "우편함", "투표함"),
+            "임": ("책임", "위임", "게임", "모임", "선임", "담임", "취임", "부임", "연임", "신임", "해임", "일임", "전임", "후임",
+                   "겸임", "재임", "퇴임", "타임", "프레임", "클레임"),
+            "음": ("다음", "처음", "마음", "소음", "발음", "모음", "자음", "묶음", "얼음", "웃음", "믿음", "죽음", "젊음", "볶음",
+                   "걸음", "울음", "졸음", "어음", "녹음", "잡음", "화음", "방음", "굉음", "폭음"),
+            "다": ("바다", "캐나다", "판다")}
+POLITE_YO = "세해어아에네까나지워여게데군걸죠"  # '…세요'·'…해요'·'…까요' — 그 밖의 '요'(개요·필요·수요·주요)는 명사
+STEM_EUM = "있없같않했었였겠많적높낮좋싶섰았됐"  # '있음'·'없음'·'같음'·'하였음' — 그 밖의 '…음'은 명사로 본다
+
+
+def is_sentence(text: str) -> bool:
+    """문장으로 끝나는 줄인가(제목이 아니라 본문). '…다'·'…함'·'…임'·'…음'·'…됨'·'…것'·'…세요'로 끝나는 줄.
+    마침표로 끝나면 문장. 마침표가 없으면 명사로 끝나는 제목('개요'·'필요'·'포함'·'책임'·'다음')은 문장이 아니다."""
+    t = (text or "").strip()
+    if not SENTENCE_END.search(t):
+        return False
+    if t.endswith((".", "。")):
+        return True
+    core = t.rstrip(" .。")
+    end, prev = core[-1], core[-2:-1]
+    if end == "요":
+        return prev in POLITE_YO
+    if core.endswith(NOUN_END.get(end, ())):
+        return False
+    if end == "음":
+        return prev in STEM_EUM
+    return True
+
+
+HANGUL_SEQ = "가나다라마바사아자차카타파하"
+NUM_SHAPES = ("1.", "(1)", "1)", "가.", "(가)", "가)", "①", "Ⅰ.", "제1절")  # 글자로 친 번호 모양(기호 '□'·'○' 등은 아님)
+DEFAULT_SHAPES = ("1.", "가.", "1)", "가)", "(1)", "(가)", "①")  # 양식에 없는 아래 단계에 쓸 번호 모양(공문서 항목 순서)
+DEFAULT_SYMBOLS = ("□", "○", "-", "·")  # 기호 제목 양식의 아래 단계 기호 순서
+
+
+def is_number_shape(shape: str) -> bool:
+    """글자로 친 번호 모양인가('1.'·'가.'·'(1)'·'1.1' …) — 기호('□'·'○')는 아니다."""
+    return shape in NUM_SHAPES or bool(MULTI_SHAPE.fullmatch(shape or ""))
+
+
+def typed_label(shape: str, n: int, parents=()) -> str:
+    """글자 번호 모양의 n번째 번호 글자: '1.'→'3.', '가.'→'다.', '(1)'→'(3)', '①'→'③', 'Ⅰ.'→'Ⅲ.', '제1절'→'제3절'.
+    여러 단 번호('1.1'·'1-1)')는 앞 단에 윗제목 번호(parents — 가까운 것이 뒤)를 넣는다: 윗번호 [2] → '2.3'·'2-3)'.
+    윗번호가 모자라면 1로 채운다. 번호 모양이 아니면(기호) 모양 그대로."""
+    if MULTI_SHAPE.fullmatch(shape or ""):
+        close = shape[-1] if shape[-1] in ".)" else ""
+        core = shape[:-1] if close else shape
+        sep = "-" if "-" in core else "."
+        k = len(core.split(sep))
+        ups = [int(x) for x in parents if x][-(k - 1):]
+        vals = [1] * (k - 1 - len(ups)) + ups + [n]
+        head = ROMAN[vals[0] - 1] if core[0] == "Ⅰ" and 1 <= vals[0] <= len(ROMAN) else str(vals[0])
+        return sep.join([head] + [str(v) for v in vals[1:]]) + close
+    han = HANGUL_SEQ[(n - 1) % len(HANGUL_SEQ)]
+    return {"1.": f"{n}.", "(1)": f"({n})", "1)": f"{n})", "가.": f"{han}.", "(가)": f"({han})", "가)": f"{han})",
+            "①": chr(0x2460 + n - 1) if 1 <= n <= 20 else f"({n})",
+            "Ⅰ.": (ROMAN[n - 1] if 1 <= n <= len(ROMAN) else str(n)) + ".", "제1절": f"제{n}절"}.get(shape, shape)
+
+
 SYMBOL_ROLE = {"※": "본문", "-": "본문"}  # 양식에 없는 기호 문단 → 바탕글과 같게(체크포인트 1·2 결정)
 ALIGN = {"JUSTIFY": "양쪽", "LEFT": "왼쪽", "RIGHT": "오른쪽", "CENTER": "가운데", "DISTRIBUTE": "배분",
          "DISTRIBUTE_SPACE": "나눔"}
@@ -1217,6 +1284,8 @@ class Ctx:
         self.log, self.toc_entries, self.toc_anchor, self.out_roles, self.approved = [], [], {}, [], []
         self.toc_target = {}  # 차례 항목 번호 → 결과의 대상(제목 hp:p 또는 표·그림 개체) — 쪽 번호 상호 참조용
         self.bodies, self.toc_ids = None, None
+        self.head_info = {}  # 제목 역할 → 번호 방식(heading_info)
+        self.seen_levels = set()  # 제목이 이미 나온 개요 수준(첫 제목의 시작 번호를 정할 때)
         if self.dst.line_break:
             self.log.append("줄 나눔 기준: 모든 문단 모양을 한글 단위 '글자'·영어 단위 '글자'로(결정 '줄 나눔' — "
                             "긴 경로·주소 때문에 양쪽 정렬한 줄의 낱말 사이가 벌어지지 않게)")
@@ -1426,15 +1495,20 @@ def heading_example(ctx: Ctx, ex: dict, role: str):
         return ex[role]
     n = int(role[0])
     have = sorted(int(k[0]) for k in ex if k in HEADING_ROLES)
-    if not have:
-        raise SystemExit("양식에 번호 제목 예시가 없다 — 원고의 제목을 놓을 모양이 없다")
+    if not have:  # 양식에 제목 예시가 하나도 없음 — heading_para가 따로 다룬다(여기까지 오면 본문 모양)
+        return ex["본문"]
     near = max([a for a in have if a < n], default=have[0])
     e = ex[f"{near}수준"]
     key = ("대체", role)
     if key not in ctx.cap_pp:
         def case_left(pid):
-            m = ctx.dst.get("paraPr", pid).find(f".//{q('hp:case')}/{q('hh:margin')}/{q('hc:left')}")
-            return int(m.get("value")) if m is not None else None
+            """왼쪽 여백(실제 값 ×100). hp:case 값이 실제, switch 없는 문단 모양(한글 2020 등)은 2배로 저장."""
+            pp = ctx.dst.get("paraPr", pid)
+            m = pp.find(f".//{q('hp:case')}/{q('hh:margin')}/{q('hc:left')}")
+            if m is not None:
+                return int(m.get("value"))
+            m = pp.find(f"{q('hh:margin')}/{q('hc:left')}")
+            return int(m.get("value")) // 2 if m is not None else None
         prev = ex.get(f"{near - 1}수준")
         a, b = case_left(e.get("paraPrIDRef")), case_left(prev.get("paraPrIDRef")) if prev is not None else None
         step = (a - b) if a is not None and b is not None and a > b else 1000
@@ -1444,19 +1518,248 @@ def heading_example(ctx: Ctx, ex: dict, role: str):
             h = node.find(q("hh:heading"))
             if h is not None and h.get("type") in ("OUTLINE", "NUMBER"):
                 h.set("level", str(int(h.get("level")) + diff))
-            for case in node.iter(q("hp:case")):
-                lf = case.find(f"{q('hh:margin')}/{q('hc:left')}")
+            for m in node.iter(q("hh:margin")):  # hp:case는 실제 값, hp:default와 switch 없는 값은 2배로 저장
+                lf = m.find(q("hc:left"))
                 if lf is not None:
-                    lf.set("value", str(int(lf.get("value")) + step * diff))
-            for dflt in node.iter(q("hp:default")):
-                lf = dflt.find(f"{q('hh:margin')}/{q('hc:left')}")
-                if lf is not None:
-                    lf.set("value", str(int(lf.get("value")) + 2 * step * diff))
+                    factor = 1 if local(m.getparent()) == "case" else 2
+                    lf.set("value", str(int(lf.get("value")) + factor * step * diff))
         c = copy.deepcopy(e)
         c.set("paraPrIDRef", ctx.dst.variant("paraPr", e.get("paraPrIDRef"), fn))
         ctx.cap_pp[key] = c
-        ctx.log.append(f"⚠ 양식에 {role} 제목이 없어 {near}수준 모양에서 번호 수준만 {diff}단계 내려 씀")
+        info = heading_info(ctx, ex, role)
+        how = (f"번호 수준만 {diff}단계 내려" if info["방식"] == "자동" else
+               f"번호는 '{info['글자']}' 꼴 글자로" if info["방식"] == "글자" else "번호 없이")
+        ctx.log.append(f"⚠ 양식에 {role} 제목이 없어 {near}수준 모양에서 {how} 씀(왼쪽 여백만 한 단계 더)")
     return ctx.cap_pp[key]
+
+
+def heading_info(ctx: Ctx, ex: dict, role: str) -> dict:
+    """제목 역할의 번호 방식 — {"방식": "자동"(개요·문단 번호) | "글자"(양식이 번호·기호를 직접 침) | "없음", "모양", "글자", "뒤"}.
+    양식에 그 단계가 없으면 가장 가까운 윗단계를 따른다: 자동이면 자동(번호 수준만 내림), 글자면 아직 안 쓴 번호 모양
+    (공문서 항목 순서 1.·가.·1)·가)·(1)·(가)·① — 기호 제목이면 □·○·-·· 순서), 없음이면 없음.
+    양식에 제목 예시가 하나도 없으면 {"방식": "없음", "예시 없음": True}."""
+    if role in ctx.head_info:
+        return ctx.head_info[role]
+
+    def of(rl):
+        p = ex[rl]
+        hd = ctx.dst.get("paraPr", p.get("paraPrIDRef")).find(q("hh:heading"))
+        if hd is not None and hd.get("type") in ("OUTLINE", "NUMBER"):
+            return {"방식": "자동"}
+        info = (ctx.R.get("제목 번호") or {}).get(rl)
+        if info and info.get("방식") in ("글자", "없음"):
+            return info
+        t = own_text(p).strip()  # '제목 번호'가 없는 프로필(손 프로필): 예시 글자에서 읽는다
+        tpx = typed_prefix(t)
+        if tpx and tpx[0] not in SYMBOL_ROLE:
+            rest, lit = t[len(tpx[1]):], tpx[1].rstrip()
+            return {"방식": "글자", "모양": tpx[0], "글자": lit, "뒤": tpx[1][len(lit):] + rest[:len(rest) - len(rest.lstrip())]}
+        return {"방식": "없음"}
+    have = sorted(int(k[0]) for k in ex if k in HEADING_ROLES)
+    if role in ex:
+        info = of(role)
+    elif not have:
+        info = {"방식": "없음", "예시 없음": True}
+    else:
+        n = int(role[0])
+        base = of(f"{max([a for a in have if a < n], default=have[0])}수준")
+        if base["방식"] == "글자":
+            used = {of(f"{a}수준").get("모양") for a in have} | {v.get("모양") for v in ctx.head_info.values()}
+            chain = DEFAULT_SHAPES if is_number_shape(base["모양"]) else DEFAULT_SYMBOLS
+            shape = next((x for x in chain if x not in used), chain[-1])
+            info = {"방식": "글자", "모양": shape, "글자": shape, "뒤": base.get("뒤") or " ", "대체": True}
+        else:
+            info = {**base, "대체": True}
+    ctx.head_info[role] = info
+    return info
+
+
+def no_heading(n):
+    """문단 모양 변형: 번호 설정을 뺀다(자동 번호를 글자로 바꿔 넣을 때)."""
+    h = n.find(q("hh:heading"))
+    if h is None or h.get("type") == "NONE":
+        return False
+    h.set("type", "NONE")
+    h.set("idRef", "0")
+    h.set("level", "0")
+
+
+def ms_look_para(ctx: Ctx, src, segs):
+    """원고 문단을 원고 모양 그대로(문단·글자 모양·스타일을 결과 ID로 옮김) — 양식에 놓을 모양이 없을 때.
+    자동 번호 설정은 뺀다(양식의 번호 모양이 찍히지 않게 — 번호는 부르는 쪽이 글자로 넣는다)."""
+    p = etree.Element(q("hp:p"))
+    pid = ctx.dst.variant("paraPr", ctx.ms.para_pr(src.get("paraPrIDRef")), no_heading)
+    for k, v in (("id", "0"), ("paraPrIDRef", pid), ("styleIDRef", ctx.ms.style(src.get("styleIDRef"))), ("pageBreak", "0"),
+                 ("columnBreak", "0"), ("merged", "0")):
+        p.set(k, v)
+    first = next((c for c, _ in segs if c and not c.startswith("@")), None) or text_run_cid(src)
+    prev = None
+    for scid, ts in segs:
+        cid = ctx.ms.char_pr(scid if scid and not scid.startswith("@") else first)
+        if prev is None or prev.get("charPrIDRef") != cid:
+            prev = etree.SubElement(p, q("hp:run"))
+            prev.set("charPrIDRef", cid)
+        prev.extend(ts)
+    if prev is None:
+        etree.SubElement(p, q("hp:run")).set("charPrIDRef", ctx.ms.char_pr(first))
+    return p
+
+
+def bold_body_para(ctx: Ctx, ex: dict, segs):
+    """양식 본문 문단 모양(첫 줄 들여쓰기만 뺌) + 굵은 글자 — 양식에 제목 예시가 없을 때의 제목(결정 '제목 모양': "본문 굵게")."""
+    e = ex["본문"]
+
+    def pfn(n):
+        changed = no_heading(n) is not False
+        for m in n.iter(q("hh:margin")):
+            it = m.find(q("hc:intent"))
+            if it is not None and it.get("value") != "0":
+                it.set("value", "0")
+                changed = True
+        return None if changed else False
+
+    def cfn(n):
+        if n.find(q("hh:bold")) is not None:
+            return False
+        etree.SubElement(n, q("hh:bold"))
+    np = copy.deepcopy(e)
+    np.set("paraPrIDRef", ctx.dst.variant("paraPr", e.get("paraPrIDRef"), pfn))
+    return ctx.set_seg_runs(np, ctx.dst.variant("charPr", ctx.tcolor(text_run_cid(e)), cfn), segs)
+
+
+def prefix_seg(text: str, segs, cid=None):
+    """글자 조각 앞에 글자를 붙인다. cid: 색을 따를 원고 글자 모양(없으면 문단의 글자 모양 그대로)."""
+    t = etree.Element(q("hp:t"))
+    t.text = text
+    return [(cid, [t])] + list(segs)
+
+
+def bullet_seg(ctx: Ctx, r, segs):
+    """원고 글머리표(문단 모양의 기호 — 역할매핑 '앞기호')를 글자로 넣는다: 양식 문단 모양에는 글머리표가 없으므로."""
+    if not r.get("앞기호"):
+        return segs
+    ctx.approved.append({"문단": r["문단"], "내용": f"글머리표 '{r['앞기호'].strip()}'를 글자로 넣음"})
+    return prefix_seg(r["앞기호"], segs, segs[0][0] if segs else None)
+
+
+def para_fallback(ctx: Ctx, sec, r, src, role, e):
+    """제목·본문 문단 하나를 양식 모양으로 바꾸다 오류가 나면: 그 문단만 원고 모양 그대로 두고(글자 보존) 알림을 남긴다.
+    자동 번호·글머리표는 글자로 넣는다(양식의 번호 모양이 대신 찍히지 않게)."""
+    ctx.log.append(f"{r['문단']} 오류 자세히: {type(e).__name__}: {e}")
+    segs = bullet_seg(ctx, r, text_segs(src))
+    ent = {"역할": role, "원고": r["문단"], "원고 그대로": True, "번호 둠": True}
+    auto = (r.get("번호") or "").strip() if role in HEADING_ROLES and not (r.get("지울번호") or "").strip() else ""
+    if auto:
+        segs = prefix_seg(f"{auto} ", segs)
+        ent["넣은번호"] = f"{auto} "
+        ctx.approved.append({"문단": r["문단"], "내용": f"원고 자동 번호 '{auto}'를 글자로 넣음(원고 모양 그대로 둔 제목)"})
+    np = ms_look_para(ctx, src, segs)
+    sec.append(np)
+    ctx.out_roles.append(ent)
+    if role in HEADING_ROLES:
+        ctx.toc_entries.append((role, plain(flat(segs)).strip()))
+        ctx.toc_target[len(ctx.toc_entries) - 1] = np
+    ctx.log.append(f"⚠ {r['문단']} '{own_text(src).strip()[:30]}' — 양식 모양으로 바꾸다 문제가 생겨 원고 모양 그대로 둠(한글에서 확인해 주세요)")
+
+
+def heading_para(ctx: Ctx, r, src, src_segs, role: str, ex: dict, hcount: dict, tcount: dict, chap, outline):
+    """제목 문단 하나를 양식 방식대로 만든다 → (결과 문단, 결과 역할 기록, 번호 글자, 제목 글자).
+      - 자동 번호 양식: 양식 예시 문단 + 원고 글자(원고에 친 번호는 지움 — 양식 자동 번호와 겹침)
+      - 글자 번호 양식(양식이 '1.'·'가.'를 직접 침): 같은 모양의 번호를 글자로 넣는다(원고에 친 번호는 지움)
+      - 기호 제목 양식('□'·'○'): 양식 기호를 글자로 넣는다(결정 '제목 번호': "양식" — 기본). "둠"이면 원고 번호를 그대로
+      - 번호 없는 제목 양식: 원고 번호를 그대로 둔다(자동 번호였으면 글자로 — 결정 '제목 번호': "둠" — 기본). "양식"이면 번호 없이
+      - 양식에 제목 예시가 없음: 결정 '제목 모양' — "본문 굵게"(양식 본문 글꼴로 굵게) 또는 "원고"(원고 모양 그대로), 번호는 그대로
+    역할매핑 '번호값'(장 제목을 1단계 제목으로 내린 것 — 원고 장 번호): 그 값부터 센다(제4장 → '4.').
+    hcount: 개요 수준별 번호(자동), tcount: 제목 단계별 번호(글자 번호와 여러 단 번호의 윗번호), chap: 장 번호(없으면 None)."""
+    n = int(role[0])
+    info = heading_info(ctx, ex, role)
+    mode = info["방식"]
+    ent = {"역할": role, "원고": r["문단"]}
+    want = int(r["번호값"]) if r.get("번호값") else None
+    tcount[n] = want if want else tcount.get(n, 0) + 1
+    for kk in [kk for kk in tcount if kk > n]:
+        del tcount[kk]
+    typed = (r.get("지울번호") or "").strip()
+    tshape = typed_prefix(typed + " ") if typed else None
+    typed_number = bool(typed) and (bool(TYPED_CHAPTER.match(typed)) or bool(tshape and is_number_shape(tshape[0])))
+    auto = (r.get("번호") or "").strip() if not typed else ""  # 원고 자동 번호(글자가 아니라 번호 모양이 찍던 것)
+    symbol = mode == "글자" and not is_number_shape(info["모양"])
+    how = ctx.D.get("제목 번호")
+    how = "양식" if how == "뺌" else how or ("양식" if symbol else "둠")
+    if mode == "자동":
+        e = heading_example(ctx, ex, role)
+        segs = bullet_seg(ctx, r, drop_typed_number(ctx, r, src_segs))
+        np = ctx.set_seg_runs(copy.deepcopy(e), ctx.tcolor(text_run_cid(e)), segs)
+        hd = ctx.dst.get("paraPr", e.get("paraPrIDRef")).find(q("hh:heading"))
+        lv = int(hd.get("level")) + 1
+        if want and lv not in ctx.seen_levels and want != 1:  # 이 수준의 첫 제목: 번호를 원고 장 번호부터 시작
+            num = outline if hd.get("type") == "OUTLINE" else ctx.dst.get("numbering", hd.get("idRef"))
+            for ph in num.findall(q("hh:paraHead")):
+                if ph.get("level") == str(lv):
+                    ph.set("start", str(want))
+            hcount[lv] = want
+            ctx.log.append(f"{r['문단']} 제목 번호를 원고 장 번호 {want}부터 시작(장 제목을 양식 1단계 제목으로)")
+        else:
+            hcount[lv] = hcount.get(lv, 0) + 1
+        ctx.seen_levels.add(lv)
+        for kk in [kk for kk in hcount if kk > lv]:
+            del hcount[kk]
+        label = head_text(outline, lv, hcount)
+        if want and hcount[lv] != want:
+            ctx.log.append(f"⚠ {r['문단']} 원고 장 번호 {want} → 결과 번호 '{label}'(자동 번호는 건너뛸 수 없어 이어서 셈)")
+        elif not want:
+            check_typed(ctx, r, r.get("지울번호"), label, typed_value(r.get("지울번호")) in (None, hcount[lv]))
+        return np, ent, label, plain(flat(segs)).strip()
+    if mode == "글자" and not (symbol and how == "둠" and (typed_number or auto)):
+        e = heading_example(ctx, ex, role)
+        k0 = len(ctx.approved)
+        segs = drop_typed_number(ctx, r, src_segs)
+        parents = ([chap] if chap else []) + [tcount.get(i, 1) for i in range(1, n)]
+        label = typed_label(info["모양"], tcount[n], parents) if not symbol else info["글자"]
+        pre = label + (info.get("뒤") or "")
+        del ctx.approved[k0:]  # '친 번호 삭제'와 '양식 번호 넣음'을 한 건으로
+        ctx.approved.append({"문단": r["문단"], "내용": (f"직접 친 번호 '{typed}' → 양식 번호 '{label}'(글자)" if typed else
+                                                     f"양식 번호 '{label}'를 글자로 넣음(양식이 제목 번호를 직접 침)")})
+        ent["넣은번호"] = pre
+        segs = bullet_seg(ctx, r, segs)
+        text = plain(flat(segs)).strip()
+        np = ctx.set_seg_runs(copy.deepcopy(e), ctx.tcolor(text_run_cid(e)), prefix_seg(pre, segs))
+        if typed_number and not symbol and not want:
+            check_typed(ctx, r, r.get("지울번호"), label, typed_value(r.get("지울번호")) in (None, tcount[n]))
+        return np, ent, label, text
+    # 번호 없는 제목(양식 제목에 번호가 없거나 예시가 아예 없음), 또는 기호 제목 양식에서 원고 번호를 그대로 두기로 한 것
+    if how == "양식" and not info.get("예시 없음"):
+        segs = drop_typed_number(ctx, r, src_segs)
+        if typed and ctx.approved and ctx.approved[-1]["문단"] == r["문단"]:
+            ctx.approved[-1]["내용"] = f"직접 친 번호 '{typed}' 삭제(양식 제목에 번호가 없음 — 설정 '양식대로')"
+        segs = bullet_seg(ctx, r, segs)
+    else:
+        segs = copy.deepcopy(src_segs)
+        lead = trim_lead(flat(segs))
+        segs = [(c, ts) for c, ts in segs if ts]
+        if lead:
+            ctx.approved.append({"문단": r["문단"], "내용": f"제목 앞 빈칸 {lead}개 삭제", "종류": "빈칸"})
+        segs = bullet_seg(ctx, r, segs)
+        if typed:
+            ent["번호 둠"] = True
+        elif auto:
+            segs = prefix_seg(f"{auto} ", segs)
+            ent["넣은번호"] = f"{auto} "
+            ctx.approved.append({"문단": r["문단"], "내용": f"원고 자동 번호 '{auto}'를 글자로 넣음(양식 제목에 번호가 없음)"})
+    text = plain(flat(segs)).strip()
+    if not info.get("예시 없음"):
+        e = heading_example(ctx, ex, role)
+        np = ctx.set_seg_runs(copy.deepcopy(e), ctx.tcolor(text_run_cid(e)), segs)
+    elif ctx.D.get("제목 모양", "본문 굵게") == "원고":
+        np = ms_look_para(ctx, src, segs)
+        ent["원고 그대로"] = True
+    else:
+        np = bold_body_para(ctx, ex, segs)
+    if info.get("예시 없음") and not getattr(ctx, "no_head_noted", False):
+        ctx.no_head_noted = True
+        ctx.log.append("⚠ 양식에 제목 예시가 없어 문서의 제목을 " + ("원래 모양 그대로 둠" if ent.get("원고 그대로")
+                       else "양식 본문 글꼴로 굵게 넣음") + " — 양식에 제목 줄을 넣으면 그 모양으로 맞춥니다")
+    return np, ent, "", text
 
 
 def ms_headers_by_chapter(ctx: Ctx, chapters) -> dict:
@@ -2417,8 +2720,13 @@ def object_paragraph(ctx: Ctx, sec, objs, kind="표"):
         pp, sid, cid = ctx.tg.para_pr(st.get("paraPrIDRef")), ctx.tg.style(st.get("id")), ctx.tg.char_pr(st.get("charPrIDRef"))
     else:
         ex = ctx.tg_para(kind) if ctx.tg_para(kind) is not None else ctx.tg_para("그림" if kind == "표" else "표")
-        pp = ctx.dst.variant("paraPr", ctx.tg.para_pr(ex.get("paraPrIDRef")), center_no_indent)
-        sid, cid = ctx.tg.style(ex.get("styleIDRef")), ctx.tg.char_pr(text_run_cid(ex))
+        if ex is not None:
+            pp = ctx.dst.variant("paraPr", ctx.tg.para_pr(ex.get("paraPrIDRef")), center_no_indent)
+            sid, cid = ctx.tg.style(ex.get("styleIDRef")), ctx.tg.char_pr(text_run_cid(ex))
+        else:  # 양식에 표도 그림도 없음 → 양식 본문 문단 모양을 가운데 정렬·여백 0으로(바탕 양식이라 ID 그대로)
+            ex = ctx.base.paras()[int(ctx.R["본문"]["본문"][1:])]
+            pp = ctx.dst.variant("paraPr", ex.get("paraPrIDRef"), center_no_indent)
+            sid, cid = ex.get("styleIDRef"), text_run_cid(ex)
     p = etree.SubElement(sec, q("hp:p"))
     for k, v in (("id", "0"), ("paraPrIDRef", pp), ("styleIDRef", sid), ("pageBreak", "0"), ("columnBreak", "0"),
                  ("merged", "0")):
@@ -3132,12 +3440,16 @@ def build_body(ctx: Ctx):
     """본문 구역(들). 장 번호를 건너뛰면(설정 '장 번호 지정' 또는 글자로 친 장 번호) 그 장부터 새 구역."""
     bp, mp = ctx.base.paras(), ctx.msp.paras()
     ex = {k: bp[int(v[1:])] for k, v in ctx.R["본문"].items()}
+    ex.setdefault("빈 줄", ex["본문"])  # 양식에 빈 줄이 없으면 본문 문단 모양의 빈 줄
     sec = copy.deepcopy(ctx.base.sections[0])
     for p in sec.findall(q("hp:p")):
         sec.remove(p)
     secs = [sec]
     chapters = [r for r in ctx.roles if r["역할"] == "장 제목"]
     assigned = {k: int(v) for k, v in ctx.D.get("장 번호 지정", {}).items()}
+    # 양식에 장 제목 모양이 없는데 원고에 장이 있음 → 장 제목을 원고 모양 그대로(멈추지 않는다). 웹·서비스는 보통 이 앞에서
+    # 장 제목을 양식 1단계 제목으로 바꿔 둔다(설문 '장 제목' — service.convert)
+    ms_chap = bool(chapters) and ctx.tg_para("장 제목") is None
     if chapters:
         for r in chapters:  # 장 번호를 글자로 쳤으면(예: docx 원고 '제7장') 그 번호를 따른다
             if r.get("지울번호"):
@@ -3146,7 +3458,12 @@ def build_body(ctx: Ctx):
         nums = [chapter_no(r) for r in chapters]
         if nums != list(range(nums[0], nums[0] + len(nums))):
             ctx.log.append(f"⚠ 원고 장 번호가 연속이 아님 {nums}")
-        title_pp = setup_chapter_outline(ctx, first_chap)
+        if ms_chap:
+            title_pp = None
+            ctx.log.append("⚠ 양식에 장 제목 모양이 없어 문서의 장 제목을 원래 모양 그대로 둠(장마다 새 쪽은 그대로) — "
+                           "양식 제목 번호가 자동 번호면 장이 바뀌어도 번호가 이어집니다")
+        else:
+            title_pp = setup_chapter_outline(ctx, first_chap)
         hdrs = ms_headers_by_chapter(ctx, chapters)
     else:
         first_chap, title_pp, hdrs = 1, None, {}
@@ -3158,6 +3475,7 @@ def build_body(ctx: Ctx):
     outline = ctx.dst.get("numbering", ctx.base.sections[0].find(f".//{q('hp:secPr')}").get("outlineShapeIDRef"))
     limit = int(ctx.D.get("연속빈줄", 1))
     k, chap, blanks, hcount, cap_count = -1, first_chap, 0, {}, {"표": 0, "그림": 0}
+    tcount = {}  # 제목 단계별 번호(글자 번호 양식의 번호, 여러 단 번호의 윗번호) — 장이 바뀌면 새로
     ctx.no_chapters = not chapters
     # 하위 항목(원고에서 앞 항목보다 더 들여 쓴 기호 항목): 양식 본문 모양 + 왼쪽 여백 한 단계 = 본문 글자 한 칸
     sub = body_sublevels(ctx) if ctx.D.get("하위 항목 들여쓰기", True) else {}
@@ -3168,9 +3486,45 @@ def build_body(ctx: Ctx):
     for r in ctx.roles:
         role, src = r["역할"], ms_para(mp, r["문단"])
         step("본문", 문단=r["문단"], 역할=role, 글자=(r.get("앞30자") or (r.get("캡션") or {}).get("글자") or "")[:40])
+        if role == "장 제목" and ms_chap:  # 양식에 장 제목 모양이 없음 → 원고 모양 그대로(번호는 글자로), 장마다 새 쪽
+            k += 1
+            prev, chap = chap, (first_chap if k == 0 else assigned.get(r["문단"], chap + 1))
+            segs = text_segs(src)
+            auto = (r.get("번호") or "").strip() if not (r.get("지울번호") or "").strip() else ""
+            ent = {"역할": "장 제목", "원고": r["문단"], "원고 그대로": True}
+            if auto:  # 원고가 자동 번호로 찍던 '제N장' → 글자로(양식 번호 모양이 대신 찍히지 않게)
+                segs = prefix_seg(f"{auto} ", segs)
+                ent["넣은번호"] = f"{auto} "
+                ctx.approved.append({"문단": r["문단"], "내용": f"원고 자동 번호 '{auto}'를 글자로 넣음(양식에 장 제목 모양이 없음)"})
+            else:
+                ent["번호 둠"] = True
+            np = ms_look_para(ctx, src, segs)
+            label_title = plain(flat(segs)).strip()
+            if started:
+                if ctx.D.get("장마다 새 쪽", True):
+                    np.set("pageBreak", "1")
+                if hdrs.get(k) is not None:
+                    run = etree.Element(q("hp:run"))
+                    run.set("charPrIDRef", np.find(q("hp:run")).get("charPrIDRef"))
+                    for kind in ("header", "footer"):
+                        for el in make_hfs(ctx, kind, hdrs.get(k), label_title):
+                            etree.SubElement(run, q("hp:ctrl")).append(el)
+                    if len(run):
+                        np.insert(0, run)
+            sec.append(np)
+            if not started:
+                attach_carrier(ctx, sec.find(q("hp:p")), hdrs.get(0), label_title)
+                started = True
+            ctx.out_roles.append(ent)
+            ctx.toc_entries.append(("장", label_title))
+            ctx.toc_target[len(ctx.toc_entries) - 1] = np
+            cap_count, blanks = {"표": 0, "그림": 0}, 0
+            tcount.clear()
+            continue
         if role == "장 제목":
             k += 1
             prev, chap = chap, (first_chap if k == 0 else assigned.get(r["문단"], chap + 1))
+            tcount.clear()
             segs = drop_typed_number(ctx, r, text_segs(src))
             deco = [local(o) for o in objects(src) if not "".join(o.itertext()).strip()]
             if deco:
@@ -3206,9 +3560,13 @@ def build_body(ctx: Ctx):
             continue
         n_before = len(sec.findall(q("hp:p")))
         if "따로 떨어진" in role:
-            if not r.get("붙일곳"):
-                raise SystemExit(f"{r['문단']} 캡션을 붙일 표·그림을 못 찾음")
-            continue
+            if r.get("붙일곳"):
+                continue
+            ctx.log.append(f"⚠ {r['문단']} 제목 줄을 붙일 표·그림을 찾지 못해 본문으로 둠")
+            role = "본문"
+        if role not in HEADING_ROLES and role not in OBJECT_ROLES and role not in ("본문", "빈 줄", "문서 제목"):
+            ctx.log.append(f"⚠ {r['문단']} 알 수 없는 역할 '{role}' → 본문으로 둠")
+            role = "본문"
         if role == "빈 줄":
             blanks += 1
             if blanks > limit:
@@ -3219,31 +3577,42 @@ def build_body(ctx: Ctx):
             continue
         blanks = 0
         if role in HEADING_ROLES or role == "본문":
-            e = heading_example(ctx, ex, role) if role in HEADING_ROLES else ex[role]
-            src_segs = inline_segs(src, ctx.ms) if ctx.D.get("인라인 개체 살림", False) else text_segs(src)
-            segs = drop_typed_number(ctx, r, src_segs) if role in HEADING_ROLES else drop_lead_space(ctx, r, src_segs)
-            if r.get("앞기호"):  # 원고 글머리표(문단 모양의 기호)를 글자로 — 양식 본문 모양에는 글머리표가 없으므로
-                t = etree.Element(q("hp:t"))
-                t.text = r["앞기호"]
-                segs = [(segs[0][0] if segs else None, [t])] + segs
-                ctx.approved.append({"문단": r["문단"], "내용": f"글머리표 '{r['앞기호'].strip()}'를 글자로 넣음"})
-            np = ctx.set_seg_runs(copy.deepcopy(e), ctx.tcolor(text_run_cid(e)), segs)
-            if role in HEADING_ROLES and ctx.D.get("제목 다음 문단과 함께", True):
-                np.set("paraPrIDRef", ctx.dst.keep_with_next(np.get("paraPrIDRef")))
-            more = sub.get(r["문단"], 0) * sub_pt if role == "본문" else 0
-            if more:
-                np.set("paraPrIDRef", indent_more(ctx, np.get("paraPrIDRef"), more))
-            sec.append(np)
-            ctx.out_roles.append({"역할": role, "원고": r["문단"], **({"왼쪽더함": more} if more else {})})
-            if role in HEADING_ROLES:
-                lv = int(ctx.dst.get("paraPr", e.get("paraPrIDRef")).find(q("hh:heading")).get("level")) + 1
-                hcount[lv] = hcount.get(lv, 0) + 1
-                for kk in [kk for kk in hcount if kk > lv]:
-                    del hcount[kk]
-                auto = head_text(outline, lv, hcount)
-                check_typed(ctx, r, r.get("지울번호"), auto, typed_value(r.get("지울번호")) in (None, hcount[lv]))
-                ctx.toc_entries.append((role, f"{auto} {plain(flat(segs)).strip()}"))
-                ctx.toc_target[len(ctx.toc_entries) - 1] = np
+            keep = (len(ctx.out_roles), len(ctx.toc_entries), len(ctx.approved), dict(hcount), dict(tcount))
+            try:
+                src_segs = inline_segs(src, ctx.ms) if ctx.D.get("인라인 개체 살림", False) else text_segs(src)
+                if role == "본문":
+                    e = ex[role]
+                    segs = drop_lead_space(ctx, r, src_segs)
+                    segs = bullet_seg(ctx, r, segs)
+                    np = ctx.set_seg_runs(copy.deepcopy(e), ctx.tcolor(text_run_cid(e)), segs)
+                    more = sub.get(r["문단"], 0) * sub_pt
+                    if more:
+                        np.set("paraPrIDRef", indent_more(ctx, np.get("paraPrIDRef"), more))
+                    sec.append(np)
+                    ctx.out_roles.append({"역할": role, "원고": r["문단"], **({"왼쪽더함": more} if more else {})})
+                else:
+                    np, ent, label, text = heading_para(ctx, r, src, src_segs, role, ex, hcount, tcount,
+                                                        None if ctx.no_chapters else chap, outline)
+                    if ctx.D.get("제목 다음 문단과 함께", True):
+                        np.set("paraPrIDRef", ctx.dst.keep_with_next(np.get("paraPrIDRef")))
+                    sec.append(np)
+                    ctx.out_roles.append(ent)
+                    ctx.toc_entries.append((role, f"{label} {text}".strip()))
+                    ctx.toc_target[len(ctx.toc_entries) - 1] = np
+            except Exception as e:  # noqa: BLE001 — 문단 하나 때문에 변환 전체가 멈추지 않게(원고 모양 그대로 + 알림)
+                ctx.para_fails = getattr(ctx, "para_fails", 0) + 1
+                if ctx.D.get("개체 오류 멈춤") or ctx.para_fails > max(5, len(ctx.roles) // 10):
+                    raise  # 시험용이거나, 안 되는 문단이 너무 많으면(양식·원고 전체의 문제) 오류로 알린다
+                for p in sec.findall(q("hp:p"))[n_before:]:
+                    sec.remove(p)
+                del ctx.out_roles[keep[0]:], ctx.toc_entries[keep[1]:], ctx.approved[keep[2]:]
+                for kk in [kk for kk in ctx.toc_target if kk >= keep[1]]:
+                    del ctx.toc_target[kk]
+                hcount.clear()
+                hcount.update(keep[3])
+                tcount.clear()
+                tcount.update(keep[4])
+                para_fallback(ctx, sec, r, src, role, e)
         elif role in OBJECT_ROLES:
             snap = snapshot(ctx, sec, cap_count)
             try:
@@ -3259,8 +3628,6 @@ def build_body(ctx: Ctx):
         elif role == "문서 제목":
             sec.append(doc_title_para(ctx, src, segs_of(src)))
             ctx.out_roles.append({"역할": "문서 제목", "원고": r["문단"]})
-        else:
-            raise SystemExit(f"{r['문단']} 처리 못 하는 역할: {role}")
         if not started and len(sec.findall(q("hp:p"))) > n_before:
             attach_carrier(ctx, sec.find(q("hp:p")), hdrs.get(0), "")  # 장 앞: 머리말 오른쪽 칸(장 제목)은 비움
             started = True
@@ -3482,6 +3849,29 @@ def is_outline(ctx: Ctx, p) -> bool:
     return h is not None and h.get("type") == "OUTLINE"
 
 
+def toc_bookmark(ctx: Ctx, p):
+    """제목 문단 맨 앞(첫 글자 앞)에 책갈피를 달고 그 이름을 돌려준다 — 개요가 아닌 제목의 쪽 번호 참조 대상.
+    이름은 '차례1'·'차례2' …(문서에 이미 있는 책갈피 이름과 겹치지 않게). 글자가 없는 문단이면 None.
+    한글 2020으로 확인(2026-11-11 시험 x9b·x9c): 책갈피 참조는 '?이름;6;0;0;0;'('#' 없이), 열 때 쪽을 다시 계산한다."""
+    pool = id_pool(ctx)
+    if "marks" not in pool:
+        pool["marks"] = {b.get("name") for s in ctx.bodies for b in s.iter(q("hp:bookmark"))}
+        pool["mark_n"] = 0
+    run = next((r for r in p.findall(q("hp:run")) if r.find(q("hp:t")) is not None), None)
+    if run is None:
+        return None
+    while True:
+        pool["mark_n"] += 1
+        name = f"차례{pool['mark_n']}"
+        if name not in pool["marks"]:
+            break
+    pool["marks"].add(name)
+    ctrl = etree.Element(q("hp:ctrl"))
+    etree.SubElement(ctrl, q("hp:bookmark")).set("name", name)
+    run.insert(list(run).index(run.find(q("hp:t"))), ctrl)
+    return name
+
+
 def toc_page_ref(ctx: Ctx, n: int, page) -> list:
     """차례 항목 n의 쪽 번호 자리 → 한글이 문서를 열 때 쪽을 계산하는 상호 참조 필드('… 쪽 번호').
     한글 없이 만드는 웹·채팅에서도 차례 쪽 번호가 채워진다(2026-11-11 사용자 요청).
@@ -3494,11 +3884,15 @@ def toc_page_ref(ctx: Ctx, n: int, page) -> list:
     if el is None or ctx.bodies is None or not any(el.getroottree().getroot() is s for s in ctx.bodies):
         return []
     tag = local(el)
-    if tag == "p":
-        if not is_outline(ctx, el):
-            return []
+    mark = None
+    if tag == "p" and is_outline(ctx, el):
         el.set("id", fresh_id(ctx))  # 결과의 제목 문단 id는 대부분 0 — 늘 새로(다른 곳이 가리키지 않음)
         ref_type, code = "TARGET_OUTLINE", 5
+    elif tag == "p":  # 개요가 아닌 제목(번호를 글자로 친 제목·번호 없는 제목·원고 모양 그대로 둔 제목): 책갈피를 달고 그 쪽 번호
+        mark = toc_bookmark(ctx, el)
+        if mark is None:
+            return []
+        ref_type, code = "TARGET_BOOKMARK", 6
     elif tag in TOC_REF:
         used, oid = id_pool(ctx)["used"], el.get("id")
         if not oid or oid == "0" or used[oid] > 1:  # 양식 예시를 복사해 같은 id인 표가 여럿 — 이 표만 새 id
@@ -3508,7 +3902,7 @@ def toc_page_ref(ctx: Ctx, n: int, page) -> list:
         ref_type, code = TOC_REF[tag]
     else:
         return []
-    target, fid = el.get("id"), fresh_id(ctx)
+    target, fid = (mark if mark is not None else "#" + el.get("id")), fresh_id(ctx)  # 책갈피는 '#' 없이 이름
     cb = etree.Element(q("hp:ctrl"))
     fb = etree.SubElement(cb, q("hp:fieldBegin"))
     for k, v in (("id", fid), ("type", "CROSSREF"), ("name", ""), ("editable", "0"), ("dirty", "1"), ("zorder", "-1"),
@@ -3518,8 +3912,8 @@ def toc_page_ref(ctx: Ctx, n: int, page) -> list:
     ps.set("cnt", "8")
     ps.set("name", "")
     for tag_, name, val in (("booleanParam", "Fiexde", "1"), ("integerParam", "Prop", "0"),
-                            ("stringParam", "Command", f"?#{target};{code};0;0;0;"),
-                            ("stringParam", "RefPath", f"?#{target};"), ("stringParam", "RefType", ref_type),
+                            ("stringParam", "Command", f"?{target};{code};0;0;0;"),
+                            ("stringParam", "RefPath", f"?{target};"), ("stringParam", "RefType", ref_type),
                             ("stringParam", "RefContentType", "OBJECT_TYPE_PAGE"),
                             ("booleanParam", "RefHyperLink", "false"),
                             ("stringParam", "RefOpenType", "HWPHYPERLINK_JUMP_CURRENTTAB")):
@@ -4113,12 +4507,17 @@ def toc_pages(pdf: Path, entries) -> list:
             if needle and needle in body[j][2]:
                 return j
         return None
-    res, k = [], 0
+    res, k, used = [], 0, Counter()
     for ent in entries:
         text = ent[1]
         anchor = norm(ent[2]) if len(ent) > 2 and ent[2] else None
         key = norm(text)
         found = first(key, k)
+        # 같은 글자의 항목이 여럿이면(번호 없는 같은 제목의 그림 등) 그 쪽에 나온 횟수만큼만 쓰고 다음 쪽에서 찾는다
+        while found is not None and key and used[(found, key)] >= body[found][2].count(key):
+            found = first(key, found + 1)
+        if found is not None:
+            used[(found, key)] += 1
         if found is None:
             found = first(norm(text.split(" ", 1)[1]) if " " in text else key, k)
         if found is None:
@@ -4223,8 +4622,8 @@ def check_text(R: Run, out_pkg: Pkg):
         else:
             s = own_text(src)
             pre = r.get("지울번호")
-            if pre and R.D.get("제목 직접 번호 삭제", True) and s.startswith(pre):
-                s = s[len(pre):]
+            if pre and R.D.get("제목 직접 번호 삭제", True) and s.startswith(pre) and r["문단"] not in raw:
+                s = s[len(pre):]  # (번호 없는 제목 양식에서 원고 번호를 그대로 둔 제목은 빼지 않는다)
             if role.endswith("캡션(개체 없음)") and r["문단"] not in raw:
                 s = caption_norm(s, R.D)[0]
             if r.get("앞기호") and role in HEADING_ROLES + ("본문",):  # 글머리표를 글자로 넣은 것(승인 변경)
@@ -4255,6 +4654,8 @@ def check_text(R: Run, out_pkg: Pkg):
         else:
             t = own_text(p)
             lab = added_label.get(o["원고"]) if o["역할"] == "장 제목" else None
+            if o.get("넣은번호"):  # 글자로 넣은 제목 번호(글자 번호 양식의 번호, 글자로 바꾼 원고 자동 번호) — 승인 변경
+                lab = o["넣은번호"]
             if lab and t.lstrip().startswith(lab):
                 t = t.lstrip()[len(lab):]
                 approved += 1
@@ -4297,8 +4698,11 @@ def check_format(R: Run, out_pkg: Pkg):
             st = tg.style_named(name)
             return HT.para_sig(st.get("paraPrIDRef")), HT.char_sig(st.get("charPrIDRef"))
         ex = tpara(kind) if tpara(kind) is not None else tpara("그림" if kind == "표" else "표")
-        ps = HT.para_sig(ex.get("paraPrIDRef"))  # object_paragraph: 가운데 정렬, 왼쪽·오른쪽·첫 줄 0
-        return ("가운데", "0pt", "0pt", "0pt") + ps[4:], HT.char_sig(text_run_cid(ex))
+        H = HT
+        if ex is None:  # 양식에 표도 그림도 없음 → 양식 본문 문단 모양(가운데·여백 0)
+            H, ex = HB, bp[int(Rr["본문"]["본문"][1:])]
+        ps = H.para_sig(ex.get("paraPrIDRef"))  # object_paragraph: 가운데 정렬, 왼쪽·오른쪽·첫 줄 0
+        return ("가운데", "0pt", "0pt", "0pt") + ps[4:], H.char_sig(text_run_cid(ex))
 
     def cap_exp(kind, cont=False):
         """양식 제목(캡션) 문단 모양 — 붙은 캡션의 첫 문단이나 따로 놓인 제목 문단. cont: '(계속)' 제목(번호 없는 모양)."""

@@ -187,8 +187,115 @@ def sig(r):
     return r["p"].get("paraPrIDRef"), text_run_cid(r["p"])
 
 
-def body_roles(desc: Desc, rows):
-    """본문 부분 역할 → 기준 문단(부분 안 번호). classify(원고 분석과 같은 규칙)로 정한다."""
+def vsig(desc: Desc, r):
+    """눈에 보이는 모양(문단 모양 값, 글자 모양 값) — 한글은 같은 모양에도 ID를 여러 개 만들므로 ID가 아니라 값으로 견준다."""
+    return desc.para_sig(r["p"].get("paraPrIDRef")), desc.char_sig(text_run_cid(r["p"]))
+
+
+CAPTION_LIKE = re.compile(r"^\s*[<〈\[(【]?\s*(표|그림|사진|도표|fig\.?|figure|table)\s*[\d<\[(]", re.I)  # 제목처럼 보여도 표·그림 제목
+NOTE_LIKE = re.compile(r"^\s*(자료|출처|주|비고|단위)\s*[:：)]")
+STYLE_HINT = re.compile(r"제목|개요|heading|title", re.I)  # 스타일 이름이 제목임을 알려 줄 때
+HEAD_LEN, HEAD_LEN_PLAIN = 60, 40  # 제목으로 볼 길이(번호·기호 뒤 글자 수) / 번호 없는 제목은 더 짧게
+
+
+def is_auto(c) -> bool:
+    """자동 번호(개요·문단 번호)가 걸린 제목 문단인가."""
+    return c["역할"].endswith("수준") and c.get("수준") is not None
+
+
+def kind_of(desc: Desc, rows, cls, k) -> dict:
+    """문단 k를 제목 예시로 쓸 때의 번호 방식: 자동(개요·문단 번호) / 글자(직접 친 번호·기호) / 없음."""
+    c, text = cls[k], rows[k]["text"]
+    if is_auto(c) or (c["역할"] == "장 제목" and c.get("번호방식") != "글자"):
+        return {"방식": "자동", "모양": c.get("번호", "")}
+    t = text.strip()
+    tpx = ft.typed_prefix(t)
+    if tpx and tpx[0] not in ft.SYMBOL_ROLE:
+        rest = t[len(tpx[1]):]
+        lit = tpx[1].rstrip()
+        gap = tpx[1][len(lit):] + rest[:len(rest) - len(rest.lstrip())]  # 번호 뒤 빈칸(양식에 친 그대로)
+        return {"방식": "글자", "모양": tpx[0], "글자": lit, "뒤": gap}
+    return {"방식": "없음", "모양": ""}
+
+
+def heading_kinds(desc: Desc, rows, cls, body_k, skip, mixed: bool):
+    """글자로 친 번호·기호 제목과 번호 없는 제목(굵거나 큰 짧은 줄)을 찾는다 → [(처음 나온 문단 번호, 정보)].
+    같은 (번호 모양, 문단·글자 모양)끼리 묶어 판단한다(번호 모양 하나에 단계 하나):
+      - 본문과 모양이 다르고 대부분 짧다(60자 이하) → 제목. 예시 글이 '제목을 입력하세요' 같은 문장이어도 된다.
+      - 본문과 모양이 같아도 번호가 붙고 대부분 짧은 '문장 아닌 줄'이면 제목(자동 번호 제목이 없는 양식에서만).
+      - 번호·기호가 없는 줄은 본문보다 굵거나 크고(또는 스타일 이름이 제목), 짧고, 문장이 아니고, 줄줄이 이어지지 않을 때만
+        (자동 번호 제목이 없는 양식에서만 — 표·그림 제목, '자료:' 같은 줄은 뺀다).
+    mixed: 자동 번호 제목이 함께 있는 양식(이때는 본문과 모양이 다른 '글자 번호' 제목만 더한다)."""
+    body_cid = text_run_cid(rows[body_k]["p"]) if body_k is not None else None
+    body_sig = vsig(desc, rows[body_k]) if body_k is not None else None
+    b_size = pt(desc, body_cid) if body_cid else 0.0
+    b_bold = bool(desc.char_sig(body_cid)[3]) if body_cid else False
+    groups = {}
+    for k, c in enumerate(cls):
+        t = rows[k]["text"].strip()
+        if not t or k in skip:
+            continue
+        if c["역할"] == "[판단 필요]" and "직접 친 기호/번호" in c.get("근거", ""):
+            tpx = ft.typed_prefix(t)
+            rest = t[len(tpx[1]):].strip()
+            key = (tpx[0], vsig(desc, rows[k]))
+        elif c["역할"] == "본문" and not c.get("직접기호") and not CAPTION_LIKE.match(t) and not NOTE_LIKE.match(t):
+            rest, key = t, ("", vsig(desc, rows[k]))
+        else:
+            continue
+        groups.setdefault(key, []).append((k, len(rest), ft.is_sentence(rest)))
+
+    def next_sig(k):
+        for j in range(k + 1, len(rows)):
+            if rows[j]["text"].strip() or ft.objects(rows[j]["p"]):
+                return vsig(desc, rows[j])
+        return None
+    best = {}  # 번호 모양(번호 없는 줄은 모양마다) → 그 묶음의 문단들
+    for (shape, sg), ms in groups.items():
+        short = sum(1 for _, n, _ in ms if n <= HEAD_LEN) / len(ms)
+        plain_ = sum(1 for _, n, s in ms if n <= 50 and not s) / len(ms)
+        differs = sg != body_sig
+        if shape and ft.is_number_shape(shape):
+            ok = (differs and short >= 0.6) or (not mixed and plain_ >= 0.6)
+        elif shape:  # 기호('□'·'○' …): 본문과 모양이 다를 때만
+            ok = differs and short >= 0.6
+        else:  # 번호·기호 없는 줄
+            st = desc.styles.get(rows[ms[0][0]]["p"].get("styleIDRef"))
+            look = (bool(sg[1][3]) and not b_bold) or int(sg[1][2]) / 100 >= b_size * 1.1 or \
+                bool(st is not None and STYLE_HINT.search(st.get("name") or ""))
+            tight = sum(1 for _, n, s in ms if n <= HEAD_LEN_PLAIN and not s) / len(ms)
+            ok = not mixed and differs and look and tight >= 0.6 and any(next_sig(k) != sg for k, _, _ in ms)
+        key = shape or ("", sg)
+        if ok and (key not in best or len(ms) > len(best[key])):
+            best[key] = ms
+    return sorted(((ms[0][0], kind_of(desc, rows, cls, ms[0][0])) for ms in best.values()), key=lambda x: x[0])
+
+
+def order_levels(kinds):
+    """제목 단계 순서: 처음 나온 순서. 자동 번호 제목끼리는 개요 수준 순서를 지키고, 여러 단 번호('1.1')는 윗단('1.') 바로 아래."""
+    kinds = sorted(kinds, key=lambda x: x[0])
+    autos = sorted((x for x in kinds if x[1]["방식"] == "자동"), key=lambda x: x[2])
+    it = iter(autos)
+    kinds = [next(it) if x[1]["방식"] == "자동" else x for x in kinds]
+    moved = True
+    while moved:
+        moved = False
+        shapes = [x[1].get("모양") if x[1]["방식"] == "글자" else None for x in kinds]
+        for i, s in enumerate(shapes):
+            par = ft.multi_parent_shape(s) if s else None
+            if par in shapes and shapes.index(par) > i:
+                x = kinds.pop(i)
+                kinds.insert(kinds.index(next(y for y in kinds if y[1].get("모양") == par and y[1]["방식"] == "글자")) + 1, x)
+                moved = True
+                break
+    return kinds
+
+
+def body_roles(desc: Desc, rows, picks=None):
+    """본문 부분 역할 → 기준 문단(부분 안 번호). classify(원고 분석과 같은 규칙)로 정한다.
+    picks: 사용자가 고친 것 {"제목": ["p3", "p21", …](1단계부터), "본문": "p4"} — 있으면 자동으로 찾은 것 대신 쓴다.
+    돌려주는 값: (본문 역할 R, 표·그림 역할 T, 문단 분류, 알림, 제목 번호 방식 N, 고를 수 있는 줄 후보)"""
+    picks = picks or {}
     cls = []
     for k, r in enumerate(rows):
         c = ft.classify(desc, r["sec"], f"p{k}", r["p"], {})
@@ -223,18 +330,26 @@ def body_roles(desc: Desc, rows):
     if chap is not None:
         T["장 제목"] = f"p{chap}"
     for k, c in enumerate(cls):
-        if c["역할"].endswith("수준") and c.get("수준") is not None:
+        if is_auto(c):
             levels.setdefault(c["수준"], k)
-    for n, lvl in enumerate(sorted(levels), start=1):  # 실제 개요 수준 → 양식의 n번째 제목 단계
-        if n <= 5:
-            R[f"{n}수준"] = f"p{levels[lvl]}"
-    body = Counter()  # 본문 모양: 글자 수로 가중(짧은 큰 제목 한 줄이 본문으로 뽑히지 않게)
-    for k, c in enumerate(cls):
+
+    def bodyish(k):
+        """본문 모양 후보: 번호·기호 없는 글, 그리고 번호·기호로 시작해도 긴 글·문장(개조식 '○ …' 항목)."""
+        c, t = cls[k], rows[k]["text"].strip()
         if c["역할"] == "본문":
+            return True
+        if c["역할"] == "[판단 필요]" and "직접 친 기호/번호" in c.get("근거", ""):
+            rest = t[len(ft.typed_prefix(t)[1]):].strip()
+            return len(rest) > HEAD_LEN or ft.is_sentence(rest)
+        return False
+    body = Counter()  # 본문 모양: 글자 수로 가중(짧은 큰 제목 한 줄이 본문으로 뽑히지 않게)
+    for k in range(len(cls)):
+        if bodyish(k):
             body[sig(rows[k])] += len(rows[k]["text"].strip())
+    body_sig = None
     if body:
-        top = body.most_common(1)[0][0]
-        R["본문"] = f"p{next(k for k, c in enumerate(cls) if c['역할'] == '본문' and sig(rows[k]) == top)}"
+        body_sig = body.most_common(1)[0][0]
+        R["본문"] = f"p{next(k for k in range(len(cls)) if bodyish(k) and sig(rows[k]) == body_sig)}"
     blank = Counter(sig(rows[k]) for k, c in enumerate(cls) if c["역할"] == "빈 줄" and k > 0)
     if blank:
         top = blank.most_common(1)[0][0]
@@ -286,15 +401,89 @@ def body_roles(desc: Desc, rows):
         k = next((k for k, r in enumerate(rows) if any(r["p"].find(f".//{q('hp:' + t)}") is not None for t in tags)), None)
         if k is not None:
             T[key] = f"p{k}"
-    typed = [k for k, c in enumerate(cls) if c["역할"] == "[판단 필요]" and c.get("직접기호")]
-    if typed and not levels:
-        notes.append(f"번호를 글자로 친 제목 {len(typed)}개(예: '{rows[typed[0]]['text'].strip()[:20]}') — 아직 자동 번호 제목만 양식 단계로 씀")
-    return R, T, cls, notes
+    # 제목 단계: 자동 번호 제목 + 글자로 친 번호·기호 제목 + (자동 번호 제목이 없는 양식) 번호 없는 굵은·큰 제목 — 처음 나온 순서
+    skip = {int(T[k][1:]) for k in ("장 제목", "표 계속", "그림 계속", "표 캡션", "그림 캡션") if T.get(k)}
+    kinds = [(k, {"방식": "자동", "모양": cls[k].get("번호", "")}, lvl) for lvl, k in levels.items()]
+    body_k = int(R["본문"][1:]) if R.get("본문") else None
+    kinds += [(k, info, None) for k, info in heading_kinds(desc, rows, cls, body_k, skip, mixed=bool(levels))]
+    kinds = order_levels(kinds)
+    N = {}
+    for n, (k, info, _) in enumerate(kinds[:5], start=1):
+        R[f"{n}수준"] = f"p{k}"
+        N[f"{n}수준"] = info
+    typed = [info["글자"] for _, info, _ in kinds[:5] if info["방식"] == "글자"]
+    plain_n = sum(1 for _, info, _ in kinds[:5] if info["방식"] == "없음")
+    if typed:
+        notes.append("번호·기호를 직접 친 제목을 제목 단계로 씀: " + ", ".join(f"'{x}'" for x in typed)
+                     + " — 문서의 제목 번호도 이 모양으로 글자로 넣습니다")
+    if plain_n:
+        notes.append(f"번호 없는 굵은(큰) 줄 {plain_n}가지를 제목 단계로 씀 — 틀렸으면 [제목·본문 줄 고치기]에서 바꿔 주세요")
+    if len(kinds) > 5:
+        notes.append(f"제목 단계는 5단계까지만 씀(양식에서 찾은 것 {len(kinds)}가지)")
+    # 사용자가 고친 것(제목 단계·본문 줄)
+    def valid(ref):
+        m = re.fullmatch(r"p(\d+)", str(ref or ""))
+        return bool(m) and int(m.group(1)) < len(rows) and bool(rows[int(m.group(1))]["text"].strip()) \
+            and not ft.objects(rows[int(m.group(1))]["p"])
+    if picks.get("제목") is not None:
+        good = [ref for ref in picks["제목"] if valid(ref)][:5]
+        if len(good) == len(list(picks["제목"])[:5]):
+            for key in [key for key in R if key.endswith("수준")]:
+                del R[key]
+            N = {}
+            for n, ref in enumerate(good, start=1):
+                R[f"{n}수준"] = ref
+                N[f"{n}수준"] = kind_of(desc, rows, cls, int(ref[1:]))
+            notes = [x for x in notes if "제목 단계로 씀" not in x and "5단계까지만" not in x]
+            notes.append(f"제목 단계 {len(good)}가지는 직접 고르신 줄을 씁니다" if good else "제목 단계는 쓰지 않기로 하셨습니다")
+        else:
+            notes.append("고르신 제목 줄 일부를 이 양식에서 찾지 못해 자동으로 찾은 제목 단계를 씁니다")
+    if picks.get("본문"):
+        if valid(picks["본문"]):
+            R["본문"] = picks["본문"]
+            notes.append("본문 모양은 직접 고르신 줄을 씁니다")
+        else:
+            notes.append("고르신 본문 줄을 이 양식에서 찾지 못해 자동으로 찾은 본문 모양을 씁니다")
+    return R, T, cls, notes, N, candidates(desc, rows, cls, R, T, N)
 
 
-def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None):
-    """요약. tg=(desc, rows, cls): 표·그림 역할(T)을 다른 파일에서 가져왔을 때 그 파일의 것(없으면 본문 파일)."""
+def candidates(desc: Desc, rows, cls, R, T, N, limit=40):
+    """사용자가 제목·본문 줄을 고칠 때 고를 수 있는 줄: 글이 있는 본문 부분 문단을 (번호 방식·모양, 문단·글자 모양)으로 묶어
+    묶음마다 첫 줄 하나(표·그림 제목과 개체 문단은 뺀다). 지금 맡은 역할도 함께."""
+    role_of = {int(v[1:]): k for k, v in R.items() if k != "첫 문단" and k != "빈 줄"}
+    if T.get("장 제목"):
+        role_of[int(T["장 제목"][1:])] = "장 제목"
+    groups, order = {}, []
+    for k, c in enumerate(cls):
+        t = rows[k]["text"].strip()
+        if not t or ft.objects(rows[k]["p"]) or "캡션" in c["역할"] or CAPTION_LIKE.match(t):
+            continue
+        info = kind_of(desc, rows, cls, k)
+        key = ("자동", c.get("수준"), c["역할"]) if info["방식"] == "자동" else (info["방식"], info.get("모양"), vsig(desc, rows[k]))
+        if key not in groups:
+            groups[key] = {"k": k, "n": 0, "info": info, "role": ""}
+            order.append(key)
+        g = groups[key]
+        g["n"] += 1
+        if k in role_of:  # 이 묶음의 줄이 역할을 맡고 있으면 그 줄을 보여 준다
+            g["k"], g["role"], g["info"] = k, role_of[k], (N.get(role_of[k]) or info)
+    out = []
+    for key in order[:limit]:
+        g = groups[key]
+        r = rows[g["k"]]
+        cid = text_run_cid(r["p"])
+        fonts = desc.char_sig(cid)
+        out.append({"문단": f"p{g['k']}", "보기": r["text"].strip()[:40], "글꼴": fonts[0], "크기": pt(desc, cid),
+                    "굵게": bool(fonts[3]), "방식": g["info"]["방식"], "번호": g["info"].get("모양") or "", "수": g["n"],
+                    "역할": g["role"]})
+    return out
+
+
+def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None, N=None):
+    """요약. tg=(desc, rows, cls): 표·그림 역할(T)을 다른 파일에서 가져왔을 때 그 파일의 것(없으면 본문 파일).
+    N: 제목 단계의 번호 방식(자동·글자·없음)."""
     t_desc, t_rows, t_cls = tg or (desc, rows, cls)
+    N = N or {}
 
     def para(ref, kind="본문", d=desc, rs=rows):
         if not ref:
@@ -308,7 +497,9 @@ def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None):
         ref = R.get(f"{n}수준")
         if ref:
             c = cls[int(ref[1:])]
-            heads.append({"단계": n, "번호": c.get("번호", ""), **para(ref)})
+            info = N.get(f"{n}수준") or {"방식": "자동", "모양": c.get("번호", "")}
+            shown = info.get("글자") or info.get("모양") or ""
+            heads.append({"단계": n, "번호": shown if info["방식"] != "자동" else c.get("번호", ""), "방식": info["방식"], **para(ref)})
     caps = {}
     for kind in ("표", "그림"):
         ref = T.get(kind)
@@ -393,8 +584,49 @@ def tg_score(sc) -> int:
     return s
 
 
-def analyze(path, profile_path=None) -> dict:
+def diagnose(s: dict) -> dict:
+    """양식 진단: 요약(describe) → 항목마다 있음·없음과, 없을 때 어떻게 처리하는지·한글에서 고치는 법.
+    구분: 필수(없으면 양식으로 못 씀 — 여기 오기 전에 걸러진다) / 권장(없으면 그 부분만 다르게 처리) / 선택(없어도 됨)."""
+    def font(p):
+        return f"{p['글꼴']} {p['크기']:g}pt" + (" 굵게" if p.get("굵게") else "")
+    items = []
+
+    def add(name, kind, found, missing="", fix=""):
+        items.append({"이름": name, "구분": kind, "상태": "있음" if found else "없음", "찾은 것": found or "",
+                      "없으면": "" if found else missing, "고치는 법": "" if found else fix})
+    b = s.get("본문")
+    add("본문", "필수", f"{font(b)} — '{b['보기']}'" if b else "")
+    heads = s.get("제목 단계") or []
+    how = {"자동": "자동 번호", "글자": "직접 친 번호", "없음": "번호 없음"}
+    add("제목 단계", "권장",
+        " → ".join(f"{h['단계']}단계 {h['번호'] or '(번호 없음)'}" for h in heads) if heads else "",
+        "문서에 제목이 있으면 변환할 때 여쭤봅니다(양식 본문 글꼴로 굵게 / 문서의 원래 모양 그대로).",
+        "양식 본문에 '1. 제목'처럼 제목 줄을 단계마다 한 줄씩 넣어 주세요. 번호는 직접 쳐도, 자동 번호여도 됩니다.")
+    items[-1]["단계"] = [{"단계": h["단계"], "번호": h["번호"], "방식": how.get(h.get("방식"), ""), "모양": font(h), "보기": h["보기"]}
+                        for h in heads]
+    ch = s.get("장 제목")
+    add("장 제목", "권장", f"{font(ch)} — '{ch['보기']}'" if ch else "",
+        "문서에 장(제1장 …)이 있으면 변환할 때 여쭤봅니다(양식 1단계 제목으로 / 문서의 원래 모양 그대로).",
+        "양식 본문 맨 앞에 '제1장 제목' 줄을 넣어 주세요.")
+    for kind, tip in (("표", "제목이 달린 표를 하나 넣어 주세요(3줄×2칸 이상이면 테두리·머리행 모양을 정확히 읽습니다)."),
+                      ("그림", "그림(또는 그림을 넣는 틀)과 그림 제목을 하나 넣어 주세요.")):
+        c = s.get(kind)
+        add(kind, "권장", (f"제목 '{c['캡션']}' · 위치 {c['위치']}" if c.get("캡션") else "제목(캡션) 없는 예시") if c else "",
+            f"문서의 {kind}{'는' if kind == '표' else '은'} 원래 모양 그대로 둡니다.", tip)
+    has_hf = "머리말" in s or "꼬리말" in s
+    add("머리말·꼬리말", "권장", " / ".join(f"{k} '{s[k]}'" if s[k] else f"{k}(글자 없음)" for k in ("머리말", "꼬리말") if k in s)
+        if has_hf else "", "머리말·꼬리말 없이 만듭니다.", "[쪽] → [머리말/꼬리말]로 머리말을 넣어 주세요.")
+    pn = s.get("쪽 번호")
+    add("쪽 번호", "권장", f"모양 {pn['모양']}" if pn else "", "쪽 번호 없이 만듭니다.", "[쪽] → [쪽 번호 매기기]로 쪽 번호를 넣어 주세요.")
+    for part in ("표지", "차례"):
+        add(part, "선택", "양식의 것을 씁니다" if s["부분"].get(part) else "", f"원하시면 간단한 {part}를 만들어 드립니다.", "")
+    lacking = [x["이름"] for x in items if x["상태"] == "없음" and x["구분"] == "권장"]
+    return {"판정": "주의" if lacking else "통과", "없는 것": lacking, "항목": items}
+
+
+def analyze(path, profile_path=None, picks=None) -> dict:
     """양식 파일(하나 또는 여러 개) → 프로필(dict). profile_path를 주면 JSON으로 쓰고 양식 파일 경로는 그 폴더 기준 상대 경로로.
+    picks: 사용자가 고친 제목 단계·본문 줄(body_roles 참고) — 본문을 가져올 파일에만 쓴다.
 
     여러 파일이면(회사 양식이 앞표지·목차·본문 스타일·표 그림 양식처럼 나뉜 경우) 부분마다 알맞은 파일을 고른다.
       - 본문(본문·제목 단계·빈 줄, 쪽 설정·글꼴의 바탕): 본문 문단이 있고 제목 단계가 가장 많은 파일
@@ -404,13 +636,15 @@ def analyze(path, profile_path=None) -> dict:
     scans = [scan(p) for p in paths]
     for sc in scans:
         if "본문" in sc["parts"]:
-            sc["R"], sc["T"], sc["cls"], sc["bnotes"] = body_roles(sc["desc"], sc["rows"]["본문"])
+            sc["R"], sc["T"], sc["cls"], sc["bnotes"], sc["N"], sc["cands"] = body_roles(sc["desc"], sc["rows"]["본문"])
     bodies = [i for i, sc in enumerate(scans) if "본문" in sc["parts"]]
     if not bodies:
         raise ValueError("본문을 찾지 못했다(표지·차례 뒤에 쪽이 없음)")
     bi = max(bodies, key=lambda i: (body_score(scans[i]), -i))
     ti = max(bodies, key=lambda i: (tg_score(scans[i]), i == bi, -i))
     B, TG = scans[bi], scans[ti]
+    if picks:  # 사용자가 고친 줄은 본문을 가져오는 파일의 문단 번호
+        B["R"], _, B["cls"], B["bnotes"], B["N"], B["cands"] = body_roles(B["desc"], B["rows"]["본문"], picks)
 
     def pick_part(name):
         own = [i for i, sc in enumerate(scans) if name in sc["parts"] and "본문" not in sc["parts"]]
@@ -428,7 +662,7 @@ def analyze(path, profile_path=None) -> dict:
     if ti == bi:
         notes = list(B["notes"]) + list(B["bnotes"])  # 파일 하나: 예전 순서 그대로
     R, T, cls = B["R"], TG["T"], B["cls"]
-    roles = {"본문": R, "표그림": T}
+    roles = {"본문": R, "표그림": T, "제목 번호": B["N"]}
     parts = {}
     cover_lines = []
     if ci is not None:
@@ -458,7 +692,9 @@ def analyze(path, profile_path=None) -> dict:
         "양식역할": roles,
     }
     prof["요약"] = describe(B["desc"], B["rows"]["본문"], cls, R, T, cover_lines, toc_R, parts,
-                          tg=(TG["desc"], TG["rows"]["본문"], TG["cls"]) if ti != bi else None)
+                          tg=(TG["desc"], TG["rows"]["본문"], TG["cls"]) if ti != bi else None, N=B["N"])
+    prof["요약"]["후보"] = B["cands"]
+    prof["요약"]["진단"] = diagnose(prof["요약"])
     if len(paths) > 1:
         unused = [names[i] for i in range(len(paths)) if i not in used]
         prof["요약"]["파일"] = {"본문": names[bi], "표·그림": names[ti], "표지": names[ci] if ci is not None else None,

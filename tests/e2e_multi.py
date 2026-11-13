@@ -41,6 +41,11 @@ def main(argv):
         if not cond:
             fails.append(msg)
 
+    def has_part(page, name):
+        """양식 진단표에서 그 항목이 '있음'(✓)인가."""
+        return page.evaluate("""(n) => [...document.querySelectorAll('#template-card .diag > li')]
+            .some(li => li.querySelector('.d-name').innerText.trim() === n && li.classList.contains('ok'))""", name)
+
     def card_files(page):
         return page.eval_on_selector_all(".tfiles li", "els => els.map(e => e.innerText.replace(/\\s+/g, ' ').trim())")
 
@@ -61,8 +66,7 @@ def main(argv):
         role = {f.split(" ")[0]: f for f in F}
         ok = (len(F) == 4 and "표지" in next(f for f in F if cover.name in f) and "차례" in next(f for f in F if toc.name in f)
               and "본문" in next(f for f in F if body.name in f) and "표·그림" in next(f for f in F if tg.name in f))
-        chips = page.inner_text("#template-card .chips")
-        check(ok and "✓ 표지" in chips and "✓ 차례" in chips, "4개 한꺼번에: 파일마다 맡은 부분 표시, 표지·차례 ✓")
+        check(ok and has_part(page, "표지") and has_part(page, "차례"), "4개 한꺼번에: 파일마다 맡은 부분 표시, 표지·차례 ✓")
         page.screenshot(path=str(out / "01_여러파일.png"), full_page=True)
 
         # 2. 저장 → 새로 고침 → 골라서 변환
@@ -105,13 +109,13 @@ def main(argv):
         page.click("#tmpl-change")
         pick(page, '[data-import="template"]', [body])
         wait_card(page)
-        check(not page.is_visible(".tfiles") and "✕ 표지" in page.inner_text("#template-card .chips"), "본문 파일 하나: 표지 없음")
+        check(not page.is_visible(".tfiles") and not has_part(page, "표지"), "본문 파일 하나: 표지 없음")
         pick(page, "#tmpl-add", [cover])
         page.wait_for_function("document.querySelectorAll('.tfiles li').length === 2 || "
                                "!document.getElementById('template-error').hidden", timeout=300000)
         wait_card(page)
         F = card_files(page)
-        check(len(F) == 2 and "✓ 표지" in page.inner_text("#template-card .chips")
+        check(len(F) == 2 and has_part(page, "표지")
               and "+ 양식 저장" in page.inner_text("#save-template") and page.is_enabled("#save-template"),
               f"[+ 파일 더하기]로 앞표지: 파일 2개 {F}, 표지 ✓, 새 묶음이라 저장 가능")
         page.set_viewport_size({"width": 390, "height": 844})

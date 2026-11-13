@@ -43,7 +43,7 @@ STAGE_TIP = {
 TASKS = [
     (("build_cover", "build_simple_cover", "cover_roles"), "표지를 만들던 중",
      "설정 1-1 '제목을 만들어 드릴까요?'를 '아니오'로 바꿔 다시 변환해 보세요(표지 없이 만들어집니다)."),
-    (("build_toc", "build_simple_toc", "fit_right_tabs", "toc_roles"), "차례를 만들던 중",
+    (("build_toc", "build_simple_toc", "fit_right_tabs", "toc_roles", "toc_page_ref", "toc_bookmark"), "차례를 만들던 중",
      "설정 2 '목록을 만들어 드릴까요?'를 '아니오'로 바꿔 다시 변환해 보세요(차례 없이 만들어집니다)."),
     (("make_hfs", "make_hf", "put_header_text", "set_header_slots", "template_header", "other_header",
       "put_section_ctrls", "ms_header_text"), "머리말·꼬리말을 넣던 중",
@@ -64,7 +64,8 @@ TASKS = [
     (("cmd_analyze", "classify", "caption_info", "table_info", "heading", "number_all", "walk", "merge_sections",
       "auto_judge", "auto_title", "big_tables"), "문서의 문단·표·그림을 살펴보던 중", None),
     (("build_body", "heading_example", "doc_title_para", "build_first_para", "build_chapter_para", "setup_chapter_outline",
-      "new_body_section", "attach_carrier", "chapter_outline_textlabel", "drop_typed_number"), "본문 문단을 양식 모양으로 바꾸던 중",
+      "new_body_section", "attach_carrier", "chapter_outline_textlabel", "drop_typed_number", "heading_para", "heading_info",
+      "ms_look_para", "bold_body_para", "para_fallback", "bullet_seg"), "본문 문단을 양식 모양으로 바꾸던 중",
      "원고에서 위 문단을 찾아 확인해 보세요 — 번호·기호를 직접 친 제목이면 그 줄의 번호를 지우고 시도해 볼 수 있습니다."),
 ]
 STEP_FN = {"표지": "build_cover", "차례": "build_toc", "쪽 번호": "page_numbering", "저장": "write_package",
@@ -153,8 +154,9 @@ DEFAULTS = {
     "줄 나눔": "글자",  # 모든 문단 모양 줄 나눔 기준 한글·영어 단위 '글자'(사용자 결정 2026-11-04)
     "본문 앞 빈칸 삭제": True,  # 본문 문단 앞에 친 빈칸·탭은 지우고 들여쓰기는 양식 모양으로(사용자 결정 2026-11-11)
     "하위 항목 들여쓰기": True,  # 원고에서 더 들여 쓴 하위 항목만 왼쪽 여백 한 단계(본문 한 글자) 더(사용자 결정 2026-11-11)
+    "제목 모양": "본문 굵게",  # 양식에 제목 예시가 없을 때 문서 제목: 양식 본문 글꼴로 굵게("원고"면 원래 모양 그대로) — 설문 '확인'
+    # "제목 번호"는 넣지 않는다: 번호 없는 제목 양식은 "둠"(문서 번호 그대로), 기호 제목 양식('□')은 "양식"(기호로)이 기본 — 설문 '확인'
 }
-SENTENCE_END = re.compile(r"(다|요|음|함|임|됨|것)\s*[.。]?\s*$")
 TYPED_HEAD_NO_SPACE = re.compile(r"^\s*(\d{1,2})\.(?=\S)(?!\d)")  # '8.속초' 처럼 번호 뒤 빈칸이 없는 것
 
 
@@ -170,13 +172,49 @@ def check_ext(path, what):
         raise UserError(f"{what}{eun_neun} .hwpx" + (" 또는 .docx" if what == "문서" else "") + " 파일만 받을 수 있습니다.")
     if not zipfile.is_zipfile(path):
         raise UserError(f"{what} 파일을 열 수 없습니다(손상되었거나 암호가 걸린 파일).")
+    if ext == ".hwpx":
+        check_readable(path, what)
+
+
+LOCKED_TIP = ("한글에서 파일을 열어 [파일] → [문서 암호](또는 [보안] → [배포용 문서 해제])로 암호·배포용 설정을 푼 뒤 "
+              "[다른 이름으로 저장] → 파일 형식 'HWPX'로 저장해 올려 주세요.")
+
+
+def check_readable(path, what):
+    """암호가 걸렸거나 배포용으로 잠긴 .hwpx, 한글 문서가 아닌 .hwpx를 미리 가려 알기 쉬운 말로 알린다."""
+    i_ga, _ = JOSA.get(what, ("이(가)", "은(는)"))
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        if "Contents/header.xml" not in names or not any(n.startswith("Contents/section") for n in names):
+            raise UserError(f"{what}{i_ga} 한글 문서(.hwpx) 구조가 아닙니다. 한글에서 [다른 이름으로 저장] → 파일 형식 'HWPX'로 "
+                            "저장한 파일을 올려 주세요.")
+        locked = False
+        if "META-INF/manifest.xml" in names:
+            locked = b"encryption-data" in z.read("META-INF/manifest.xml")
+        head = z.read("Contents/header.xml")[:200].lstrip(b"\xef\xbb\xbf \r\n\t")
+        if locked or not head.startswith(b"<"):
+            raise UserError(f"{what}{i_ga} 암호가 걸렸거나 배포용으로 잠긴 파일이라 읽을 수 없습니다. " + LOCKED_TIP)
 
 
 # ======================================================================= 1. 양식
 
+def table_share(path) -> float:
+    """문서 글자 가운데 표 안에 든 글자의 비율(0~1) — 본문이 표 안에 짜인 서식 문서(신청서·공문)인지 가늠한다."""
+    pk = ft.Pkg(path)
+    total = inside = 0
+    for sec in pk.sections:
+        for _, p, ctx in ft.walk(sec):
+            n = len(ft.own_text(p).strip())
+            total += n
+            inside += n if ctx == "표셀" else 0
+    return inside / total if total else 0.0
+
+
 @friendly("양식")
-def analyze_template(src, work) -> dict:
-    """양식 파일 하나(src) 또는 여러 개(목록 — 앞표지·목차·본문 스타일·표 그림 양식처럼 나뉜 회사 양식)를 분석한다."""
+def analyze_template(src, work, picks=None) -> dict:
+    """양식 파일 하나(src) 또는 여러 개(목록 — 앞표지·목차·본문 스타일·표 그림 양식처럼 나뉜 회사 양식)를 분석한다.
+    picks: 사용자가 화면에서 고친 제목 단계·본문 줄 {"제목": ["p3", …], "본문": "p4"}(양식 요약의 '후보'에서 고른 문단).
+    돌려주는 요약의 '진단'에 항목별 있음·없음과 없을 때 처리 방법이, '후보'에 고를 수 있는 줄이 들어 있다."""
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     srcs = [Path(s) for s in src] if isinstance(src, (list, tuple)) else [Path(src)]
@@ -192,7 +230,7 @@ def analyze_template(src, work) -> dict:
         if s.resolve() != d.resolve():
             shutil.copy(s, d)
     try:
-        prof = tp.analyze(dsts[0] if len(dsts) == 1 else dsts, work / "양식프로필.json")
+        prof = tp.analyze(dsts[0] if len(dsts) == 1 else dsts, work / "양식프로필.json", picks or None)
     except ValueError:
         raise UserError("양식에서 본문 쪽을 찾지 못했습니다. 표지나 차례만 있는 파일이 아니라 본문이 들어 있는 보고서를 "
                         + ("함께 " if len(srcs) > 1 else "") + "올려 주세요.")
@@ -203,7 +241,10 @@ def analyze_template(src, work) -> dict:
         s["파일"] = {k: ([names.get(n, n) for n in v] if isinstance(v, list) else names.get(v, v) if v else v) for k, v in f.items()}
         s["알림"] = [re.sub(r"양식_\d+\.hwpx", lambda m: names.get(m.group(0), m.group(0)), x) for x in s["알림"]]
     if not prof["양식역할"]["본문"].get("본문"):
-        raise UserError("양식에서 본문 문단(긴 글)을 찾지 못했습니다. 본문이 들어 있는 보고서 파일을 올려 주세요.")
+        if max(table_share(d) for d in dsts) >= 0.7:
+            raise UserError("이 파일은 글이 대부분 표 안에 들어 있는 서식(신청서·공문·칸 채우기 문서)이라 보고서 양식으로 쓸 수 없습니다. "
+                            "본문 글이 표 밖에 줄글로 들어 있는 보고서를 올려 주세요.")
+        raise UserError("양식에서 본문 문단(줄글)을 찾지 못했습니다. 본문 글이 한 문단 이상 들어 있는 보고서 파일을 올려 주세요.")
     return {"요약": s, "이름": srcs[0].name if len(srcs) == 1 else f"{srcs[0].name} 외 {len(srcs) - 1}개"}
 
 
@@ -239,10 +280,10 @@ def merge_sections(src: Path, dst: Path) -> int:
     return len(pk.sections)
 
 
-def write_config(work: Path, decisions=None) -> Path:
+def write_config(work: Path, decisions=None, judge="역할판단.json") -> Path:
     st = json.loads((work / "상태.json").read_text(encoding="utf-8"))
     cfg = {"설명": "양식 맞춤 변환(service.py)", "양식프로필": "양식프로필.json", "원고": "원고.hwpx",
-           "역할매핑": "역할매핑.json", "역할판단": "역할판단.json", "출력": f"out/{st['결과 이름']}",
+           "역할매핑": "역할매핑.json", "역할판단": judge, "출력": f"out/{st['결과 이름']}",
            "버전정보": "본문양식", "결정": {**DEFAULTS, **(decisions or {})}}
     if st.get("원본"):
         cfg["원본"] = st["원본"]
@@ -288,7 +329,7 @@ def auto_judge(rows, paras, desc, prof) -> tuple:
         tp_ = ft.typed_prefix(t.strip())
         name = tp_[0] if tp_ else None
         body = t.strip()[len(tp_[1]):] if tp_ else t.strip()
-        short = bool(name) and len(body) <= 50 and not SENTENCE_END.search(body)
+        short = bool(name) and len(body) <= 50 and not ft.is_sentence(body)
         if short and not auto_levels:
             cands.append((r, name, tp_[1]))
         elif short and ft.multi_parent_shape(name):
@@ -366,7 +407,7 @@ def auto_judge(rows, paras, desc, prof) -> tuple:
         for r in rows:
             if r["역할"] == "본문" and r["문단"] not in J:
                 t = text_of(r["문단"])
-                if TYPED_HEAD_NO_SPACE.match(t) and len(t.strip()) <= 40 and not SENTENCE_END.search(t):
+                if TYPED_HEAD_NO_SPACE.match(t) and len(t.strip()) <= 40 and not ft.is_sentence(t):
                     J[r["문단"]] = {"역할": f"{lv}수준", "지울번호": TYPED_HEAD_NO_SPACE.match(t).group(0),
                                    "근거": "자동: 번호 뒤 빈칸 없는 '1.' 제목"}
     # 나머지 판단 필요
@@ -409,7 +450,7 @@ def auto_judge(rows, paras, desc, prof) -> tuple:
         pp = desc.para_prs.get(p.get("paraPrIDRef"))
         al = pp.find(q("hh:align")).get("horizontal") if pp is not None and pp.find(q("hh:align")) is not None else ""
         bold = desc.char_prs[ft.text_run_cid(p)].find(q("hh:bold")) is not None
-        if t and len(t) <= 60 and not SENTENCE_END.search(t) and (para_size(desc, p) >= body_pt * 1.2 or al == "CENTER" or bold):
+        if t and len(t) <= 60 and not ft.is_sentence(t) and (para_size(desc, p) >= body_pt * 1.2 or al == "CENTER" or bold):
             J[first["문단"]] = {"역할": "문서 제목", "근거": "자동: 맨 앞 짧은 큰 글 → 문서 제목(양식 큰 제목 모양)"}
     return J, notes
 
@@ -430,13 +471,105 @@ def auto_title(rows, paras, stem: str) -> str:
     return re.sub(r"\s{2,}", " ", s).strip() or "보고서"
 
 
+def head_mode(prof, role: str) -> str:
+    """양식의 그 제목 단계 번호 방식: "자동"(개요·문단 번호) / "번호"(직접 친 번호) / "기호"(직접 친 '□'·'○') / "없음".
+    양식에 없는 단계는 가까운 윗단계를 따른다(엔진 heading_info와 같은 규칙)."""
+    R = prof["양식역할"]["본문"]
+    N = prof["양식역할"].get("제목 번호") or {}
+    have = sorted(int(k[0]) for k in R if k in ft.HEADING_ROLES)
+    if not have:
+        return "없음"
+    if role not in R:
+        n = int(role[0])
+        role = f"{max([a for a in have if a < n], default=have[0])}수준"
+    info = N.get(role) or {}
+    how = info.get("방식", "자동")
+    return how if how != "글자" else ("번호" if ft.is_number_shape(info.get("모양", "")) else "기호")
+
+
+def ms_number(r) -> str:
+    """원고 제목에 붙은 번호(직접 친 번호 또는 자동 번호) — 기호('○')는 번호가 아니다. 없으면 ''."""
+    typed = (r.get("지울번호") or "").strip()
+    if typed:
+        tpx = ft.typed_prefix(typed + " ")
+        return typed if ft.TYPED_CHAPTER.match(typed) or (tpx and ft.is_number_shape(tpx[0])) else ""
+    return (r.get("번호") or "").strip()
+
+
+def questions(prof, rows) -> list:
+    """문서에는 있는데 양식에는 그 모양이 없어 어떻게 할지 정해야 하는 것 — 변환 전에 사용자에게 묻는다(설문에 덧붙임).
+    항목: {"키", "질문", "선택": [{"값", "글", "설명"}], "기본"}. 답은 convert의 설문 답 '확인' {키: 값}으로 받는다."""
+    R, T = prof["양식역할"]["본문"], prof["양식역할"]["표그림"]
+    levels = [k for k in ft.HEADING_ROLES if k in R]
+    chapters = [r for r in rows if r["역할"] == "장 제목"]
+    heads = [r for r in rows if r["역할"] in ft.HEADING_ROLES]
+
+    def sample(r):
+        return (r.get("앞30자") or "").strip()[:24]
+    out = []
+    if chapters and not T.get("장 제목") and levels:
+        out.append({"키": "장 제목",
+                    "질문": f"문서에는 장 제목이 {len(chapters)}개 있는데(예: '{sample(chapters[0])}') 양식에는 장 제목 모양이 없습니다. 어떻게 할까요?",
+                    "선택": [{"값": "1수준", "글": "양식의 1단계 제목으로 맞추기",
+                             "설명": "장 제목이 양식 1단계 제목의 모양·번호가 되고, 그 아래 제목은 한 단계씩 내려갑니다"},
+                            {"값": "원고", "글": "문서의 원래 모양 그대로 두기",
+                             "설명": "장 제목만 원래 글꼴·크기로 남습니다(장마다 새 쪽에서 시작)"}],
+                    "기본": "1수준"})
+    if heads and not levels:
+        out.append({"키": "제목 모양",
+                    "질문": f"문서에는 제목이 {len(heads)}개 있는데(예: '{sample(heads[0])}') 양식에는 제목 예시가 없습니다. 제목을 어떤 모양으로 둘까요?",
+                    "선택": [{"값": "본문 굵게", "글": "양식 본문 글꼴로 굵게", "설명": "양식 본문과 같은 글꼴·크기에 굵게만 합니다"},
+                            {"값": "원고", "글": "문서의 원래 모양 그대로", "설명": "제목만 원래 글꼴·크기로 남습니다"}],
+                    "기본": "본문 굵게"})
+    numbered = [(r, head_mode(prof, r["역할"])) for r in heads if ms_number(r)]
+    numbered = [(r, m) for r, m in numbered if m in ("없음", "기호")]
+    if numbered and levels:
+        num = ms_number(numbered[0][0])
+        sym = [r for r, m in numbered if m == "기호"]
+        N = prof["양식역할"].get("제목 번호") or {}
+        mark = next((v.get("글자") for v in N.values() if v.get("방식") == "글자" and not ft.is_number_shape(v.get("모양", ""))), "□")
+        if sym:  # 기호 제목 양식(개조식 '□'·'○'): 기본은 양식 기호로
+            out.append({"키": "제목 번호",
+                        "질문": f"양식의 제목은 번호 대신 기호('{mark}')를 쓰는데 문서의 제목에는 번호가 있습니다(예: '{num}'). 어떻게 할까요?",
+                        "선택": [{"값": "양식", "글": "양식 기호로 바꾸기", "설명": f"문서 제목의 번호를 지우고 양식처럼 '{mark}' 같은 기호를 붙입니다"},
+                                {"값": "둠", "글": "문서의 번호를 그대로 두기", "설명": "제목 모양만 양식에 맞추고 번호 글자는 남깁니다"}],
+                        "기본": "양식"})
+        else:
+            out.append({"키": "제목 번호",
+                        "질문": f"양식의 제목에는 번호가 없는데 문서의 제목에는 번호가 있습니다(예: '{num}'). 번호를 어떻게 할까요?",
+                        "선택": [{"값": "둠", "글": "문서의 번호를 그대로 두기", "설명": "제목 모양만 양식에 맞추고 번호 글자는 남깁니다"},
+                                {"값": "양식", "글": "번호를 빼기", "설명": "양식처럼 번호 없는 제목으로 만듭니다"}],
+                        "기본": "둠"})
+    return out
+
+
+def shift_chapters(rows, judge: dict) -> dict:
+    """설문 '장 제목' = 양식 1단계 제목으로: 장 제목 → 1수준, 그 아래 제목은 한 단계씩 아래로(5단계까지).
+    돌려주는 값: 바꾼 역할판단(원래 판단에 덧씌움)."""
+    J = {k: dict(v) for k, v in judge.items()}
+    for r in rows:
+        key, old = r["문단"], J.get(r["문단"], {})
+        if r["역할"] == "장 제목":
+            J[key] = {k: v for k, v in old.items() if k != "번호"}
+            J[key].update({"역할": "1수준", "근거": "설문: 양식에 장 제목 모양이 없어 장 제목을 1단계 제목으로"})
+            if r.get("지울번호"):
+                J[key]["지울번호"] = r["지울번호"]
+            if re.search(r"\d", r.get("번호") or ""):  # 원고 장 번호는 지킨다(제4장 → '4.')
+                J[key]["번호값"] = ft.chapter_no(r)
+        elif r["역할"] in ft.HEADING_ROLES:
+            n = min(5, int(r["역할"][0]) + 1)
+            J[key] = {**old, "역할": f"{n}수준",
+                      "근거": (old.get("근거") or r.get("근거", ""))[:80] + " → 설문: 장 제목을 1단계로 올려 한 단계 아래로"}
+    return J
+
+
 @friendly("문서")
 def inspect_document(src, work) -> dict:
     work = Path(work)
     check_ext(src, "문서")
     if not (work / "양식프로필.json").exists():
         raise UserError("먼저 양식을 올려 주세요.")
-    for old in ("원고.hwpx", "역할매핑.json", "역할판단.json", "역할매핑_분석.md"):
+    for old in ("원고.hwpx", "역할매핑.json", "역할판단.json", "역할판단_변환.json", "역할매핑_분석.md"):
         if (work / old).exists():
             (work / old).unlink()
     src = Path(src)
@@ -492,7 +625,7 @@ def inspect_document(src, work) -> dict:
     return {"원고": src.name, "자동 제목": title, "자동 머리말": title,
             "구성": {"장": cnt.get("장 제목", 0), "제목": cnt.get("제목", 0), "본문": cnt.get("본문", 0),
                    "표": cnt.get("표 문단", 0), "그림": cnt.get("그림 문단", 0) + cnt.get("그림 문단(틀 없음)", 0)},
-            "큰 표": big, "자동 판단": len(judge), "알림": notes}
+            "큰 표": big, "자동 판단": len(judge), "알림": notes, "확인": questions(prof, rows)}
 
 
 def big_tables(R, has_table: bool) -> dict:
@@ -535,7 +668,43 @@ def decisions_from(options: dict, st: dict, prof: dict) -> dict:
     split = options.get("표", {}).get("나누기")  # 설문 5: 한쪽보다 긴 표 — "나눔"(쪽 경계에서 나눔) / "셀 단위로 나눔"
     if split in ft.tf.PAGE_BREAK:
         D["표 나누기"] = split
+    ans = options.get("확인") or {}  # 문서에는 있는데 양식에 모양이 없는 것(inspect_document의 '확인')의 답
+    if ans.get("제목 모양") in ("본문 굵게", "원고"):
+        D["제목 모양"] = ans["제목 모양"]
+    if ans.get("제목 번호") in ("둠", "양식", "뺌"):
+        D["제목 번호"] = "양식" if ans["제목 번호"] == "뺌" else ans["제목 번호"]
     return D
+
+
+TYPED_DIFF = re.compile(r"^원고에 친 번호 '(.+?)'와 결과 자동 번호 '(.+?)'가 다름")
+KEPT_OBJ = re.compile(r"^(표|그림) '.*' — 양식에 (?:표|그림) 예시가 없어 원고 모양 그대로 둠")
+
+
+def group_alerts(warns: list) -> list:
+    """알림을 사람이 읽기 좋게 묶는다: 똑같은 알림은 한 줄('… (4곳)'), 같은 종류로 여럿인 알림(직접 친 번호가 결과 번호와
+    다름, 양식에 예시가 없어 그대로 둔 표·그림)은 개수와 첫 예시만."""
+    out, at = [], {}
+
+    def put(key, make, m):
+        if key not in at:
+            at[key] = (len(out), [])
+            out.append(None)
+        at[key][1].append(m)
+        out[at[key][0]] = make(at[key][1])
+    for w in warns:
+        m = TYPED_DIFF.match(w)
+        k = KEPT_OBJ.match(w)
+        if m:
+            put("typed", lambda ms: ms[0].string if len(ms) == 1 else
+                f"문서에 직접 친 번호 {len(ms)}곳이 결과 번호와 다릅니다(예: '{ms[0].group(1)}' → '{ms[0].group(2)}') — "
+                "번호가 맞는지 한글에서 확인해 주세요", m)
+        elif k:
+            kind = k.group(1)
+            put("kept " + kind, lambda ms, kind=kind: ms[0].string if len(ms) == 1 else
+                f"{kind} {len(ms)}개 — 양식에 {kind} 예시가 없어 원래 모양 그대로 두었습니다(한글에서 확인해 주세요)", k)
+        else:
+            put(w, lambda ms, w=w: w + (f" ({len(ms)}곳)" if len(ms) > 1 else ""), w)
+    return out
 
 
 @friendly("변환")
@@ -544,7 +713,22 @@ def convert(work, options: dict) -> dict:
     st = json.loads((work / "상태.json").read_text(encoding="utf-8"))
     prof = json.loads((work / "양식프로필.json").read_text(encoding="utf-8"))
     D = decisions_from(options, st, prof)
-    R = ft.Run(write_config(work, D))
+    # 설문 '장 제목'(양식에 장 제목 모양이 없을 때): "1수준"(기본)이면 장 제목을 양식 1단계 제목으로 — 역할을 바꿔 다시 분석한다.
+    # "원고"면 역할은 그대로(엔진이 장 제목을 원고 모양 그대로 둔다). 앞선 변환에서 바꿨으면 원래 역할부터 되살린다
+    base = json.loads((work / "역할판단.json").read_text(encoding="utf-8"))
+    if st.get("역할 바꿈"):
+        ft.cmd_analyze(ft.Run(write_config(work, D)))
+    rows = json.loads((work / "역할매핑.json").read_text(encoding="utf-8"))
+    ask = {x["키"]: x for x in questions(prof, rows)}
+    shift = "장 제목" in ask and (options.get("확인") or {}).get("장 제목", ask["장 제목"]["기본"]) == "1수준"
+    if shift:
+        (work / "역할판단_변환.json").write_text(json.dumps(shift_chapters(rows, base), ensure_ascii=False, indent=1),
+                                               encoding="utf-8")
+        ft.cmd_analyze(ft.Run(write_config(work, D, judge="역할판단_변환.json")))
+    if bool(st.get("역할 바꿈")) != shift:
+        st["역할 바꿈"] = shift
+        (work / "상태.json").write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    R = ft.Run(write_config(work, D, judge="역할판단_변환.json" if shift else "역할판단.json"))
     out_dir = R.out.parent
     if out_dir.exists():
         for f in out_dir.iterdir():
@@ -559,11 +743,8 @@ def convert(work, options: dict) -> dict:
         fails = None
         check_note = [f"자동 검사를 끝내지 못했습니다({type(e).__name__}) — 결과 파일은 만들었으니 한글에서 열어 확인해 주세요."]
     log = R.f("적용로그.md").read_text(encoding="utf-8")
-    warns = check_note + [re.sub(r"^⚠\s*(p\d+(>\S+)?\s+)?", "", x[2:].strip()) for x in log.splitlines() if x.startswith("- ⚠")]
-    seen = {}  # 같은 알림이 여러 문단에서 나오면 한 줄로('… (4곳)') — 이어지는 표('(계속)')마다 같은 번호 알림이 되풀이됨
-    for w in warns:
-        seen[w] = seen.get(w, 0) + 1
-    warns = [w + (f" ({n}곳)" if n > 1 else "") for w, n in seen.items()]
+    warns = check_note + group_alerts(
+        [re.sub(r"^⚠\s*(p\d+(>\S+)?\s+)?", "", x[2:].strip()) for x in log.splitlines() if x.startswith("- ⚠")])
     made = json.loads(R.f("결과구성.json").read_text(encoding="utf-8"))
     ap = json.loads(R.f("승인변경.json").read_text(encoding="utf-8"))
     split = json.loads(R.f("표나눔.json").read_text(encoding="utf-8"))
@@ -585,10 +766,13 @@ USAGE = """사용:
   python3 service.py convert <작업 폴더> '<설문 답 JSON>'               # 3단계: 결과 .hwpx + 검증
   python3 service.py <양식> <원고> <작업 폴더> ['<설문 답 JSON>']        # 한 번에
 설문 답 JSON: {"표지":{"만들기":true,"제목":""},"차례":{"만들기":true},"쪽번호":{"방식":"본문부터","시작":1},
-              "머리말":{"만들기":true,"글자":"","방식":"자동"},"표":{"나누기":"나눔"}}
+              "머리말":{"만들기":true,"글자":"","방식":"자동"},"표":{"나누기":"나눔"},"확인":{"장 제목":"1수준"}}
   쪽번호 방식: 제목부터 / 본문부터 / 없음 / 지정(시작 = 본문 첫 쪽 번호). 제목·글자를 비우면 자동(원고에서 뽑은 제목).
   머리말 방식: 직접(글자) / 자동(원고에서 뽑은 제목) / 양식(양식 머리말 그대로 — 장 제목 칸만 원고 장 제목, 장이 없으면 양식 글자).
-  표 나누기: 한 쪽을 넘는 표가 있을 때(inspect의 '큰 표' 수 > 0)만 — "나눔"(쪽 경계에서 나눔) / "셀 단위로 나눔"."""
+  표 나누기: 한 쪽을 넘는 표가 있을 때(inspect의 '큰 표' 수 > 0)만 — "나눔"(쪽 경계에서 나눔) / "셀 단위로 나눔".
+  확인: inspect 결과 '원고'의 '확인'에 든 질문(문서에는 있는데 양식에 모양이 없는 것)의 답 {키: 값} — 빼면 질문마다 '기본'.
+    장 제목: "1수준"(양식 1단계 제목으로) / "원고"(원래 모양 그대로) · 제목 모양: "본문 굵게" / "원고"
+    제목 번호: "둠"(문서 번호 그대로) / "양식"(양식대로 — 번호 없이, 또는 양식 기호 '□'로)."""
 
 
 def cli(a) -> int:

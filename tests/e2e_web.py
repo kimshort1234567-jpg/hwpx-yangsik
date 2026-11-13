@@ -1,7 +1,10 @@
 """웹 화면 끝까지 시험(실제 브라우저 — Edge, Playwright): 양식 올리기 → 문서 올리기 → 설문 → 다운로드.
 
 사용: python -X utf8 tests/e2e_web.py <양식.hwpx> <문서> <결과 폴더> [--file] [--설문 '{"title":"yes",...}']
+                                     [--확인 '{"장 제목":"원고"}'] [--고치기 '{"p3":"h1","p27":"h2"}']
   --file: 로컬 서버 없이 index.html을 file://로 연다(내려받아 바로 여는 경우).
+  --확인: 문서에는 있는데 양식에 모양이 없을 때 생기는 추가 질문의 답(안 주면 '추천' 답).
+  --고치기: 양식 카드의 [제목·본문 줄 고치기]에서 줄(후보 문단)마다 고를 값 — ""(쓰지 않음)·"본문"·"h1"~"h5".
   화면 그림(01_처음.png …)과 내려받은 파일을 결과 폴더에 남긴다.
 """
 import functools
@@ -57,6 +60,20 @@ def main(argv):
             print("양식 오류:", page.inner_text("#template-error"))
             return 1
         page.screenshot(path=str(out / "02_양식.png"), full_page=True)
+        print("양식 진단:", page.inner_text("#template-card .verdict"))
+        if "--고치기" in argv:  # 제목·본문 줄 고치기: 줄마다 고른 뒤 [이대로 쓰기] → 같은 양식을 다시 분석
+            page.click("#tmpl-pick")
+            page.wait_for_selector("#pick-modal:not([hidden])")
+            for ref, v in json.loads(argv[argv.index("--고치기") + 1]).items():
+                page.select_option(f'#pick-list select[data-ref="{ref}"]', v)
+            page.screenshot(path=str(out / "02a_줄_고치기.png"))
+            print("줄 고치기 안내:", page.inner_text("#pick-need") or "(없음)")
+            page.click("#pick-apply")
+            page.wait_for_selector("#busy", state="hidden", timeout=300000)
+            page.wait_for_selector("#template-card .pick-state")
+            page.screenshot(path=str(out / "02b_고친_양식.png"), full_page=True)
+            print("고친 뒤:", page.inner_text("#template-card .pick-state"), "|", page.inner_text("#template-card .d-levels")
+                  .replace("\n", " / ") if page.query_selector("#template-card .d-levels") else "제목 단계 없음")
         pick(page, "document", doc)
         page.wait_for_selector("#survey-modal:not([hidden]), #document-error:not([hidden])", timeout=300000)
         if page.is_visible("#document-error"):
@@ -68,6 +85,9 @@ def main(argv):
                 continue
             if (name == "titleMode" and ans.get("title") != "yes") or (name == "headerMode" and ans.get("header") != "yes"):
                 continue  # 위 질문이 '아니오'면 하위 질문은 숨겨진다
+            if (name == "pn" and page.is_hidden("#q-pn")) or (name in ("header", "headerMode") and page.is_hidden("#q-header")):
+                print(f"설문 {name}: 안 보임 — 양식에 그 자리가 없어 묻지 않음")
+                continue
             if name == "split" and page.is_hidden("#q-split"):
                 print("설문 5(큰 표 나누기): 안 보임 — 쪽 높이에 가까운 표 없음")
                 continue
@@ -80,6 +100,14 @@ def main(argv):
             page.fill("#header-text", ans["headerText"])
         if ans.get("pnStart"):
             page.fill("#pn-start", str(ans["pnStart"]))
+        extra = json.loads(argv[argv.index("--확인") + 1]) if "--확인" in argv else {}
+        for fs in page.query_selector_all("#q-extra fieldset"):  # 양식에 없는 모양을 어떻게 할지(없으면 '추천' 답)
+            key = fs.get_attribute("data-key")
+            radios = fs.query_selector_all("input[type=radio]")
+            hit = next((r for r in radios if r.get_attribute("value") == extra.get(key)), None) or \
+                next((r for r in radios if r.evaluate("e => !!e.parentElement.querySelector('.rec')")), radios[0])
+            hit.check()
+            print(f"추가 질문 {fs.get_attribute('data-no')}({key}): {fs.query_selector('.q-text').inner_text()} → {hit.get_attribute('value')}")
         page.screenshot(path=str(out / "04_설문_답.png"))
         with page.expect_download(timeout=600000) as dl:
             page.click("#convert-btn")
