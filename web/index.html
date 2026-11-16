@@ -87,6 +87,39 @@
     <div class="card" id="done-card" hidden></div>
     <div class="error" id="convert-error" hidden role="alert"></div>
   </section>
+
+  <!-- 같은 엔진을 Claude에서 쓰는 스킬(공개판) 내려받기. 양식 파일은 들어 있지 않다 — 엔진과 한글 사용법 노트만 -->
+  <section class="skill" id="skill" aria-labelledby="skill-title">
+    <div class="skill-head">
+      <h2 id="skill-title">Claude에서도 쓸 수 있어요 <span class="tag">스킬</span></h2>
+      <a class="btn" id="skill-download" href="hwp-expert-public.zip" download>Claude 스킬 내려받기</a>
+    </div>
+    <p class="skill-lead">이 도구와 같은 변환 엔진에 한글 사용법 노트를 더한 <b>hwp-expert</b> 스킬입니다(.zip, 약 0.3 MB).
+      Claude에게 양식 파일과 바꿀 문서를 주면 양식에 맞춘 한글 파일을 만들어 주고, 애매한 부분은 먼저 물어봅니다. 한글 사용법 질문에도 답합니다.</p>
+    <details class="guide" id="skill-guide">
+      <summary>설치 방법과 쓰는 법</summary>
+      <div class="guide-body">
+        <p class="g-head">claude.ai (웹·데스크톱 앱)</p>
+        <ol>
+          <li><b>Settings → Capabilities</b>에서 <b>Code execution and file creation</b>(코드 실행과 파일 만들기)이 켜져 있는지 확인합니다.</li>
+          <li><b>Customize → Skills</b>(<a href="https://claude.ai/customize/skills" target="_blank" rel="noopener">claude.ai/customize/skills</a>)에서
+            <b>+</b> → <b>Create skill</b> → <b>Upload a skill</b>을 눌러, 내려받은 zip 파일을 <b>압축을 풀지 않고 그대로</b> 올립니다.</li>
+          <li>새 대화에서 양식 파일(.hwpx)과 바꿀 문서(.hwpx·.docx)를 올리고 "이 문서를 이 양식에 맞게 바꿔 줘"라고 합니다.</li>
+        </ol>
+        <p class="g-head">Claude Code</p>
+        <ol>
+          <li>zip의 압축을 풀어 <code>hwp-expert</code> 폴더를 <code>~/.claude/skills/</code> 아래에 둡니다(Windows는 <code>%USERPROFILE%\.claude\skills\hwp-expert\</code>).</li>
+          <li>Claude Code를 새로 연 뒤 같은 식으로 요청합니다. 한글이 설치된 PC라면 결과를 PDF로 만들어 쪽 모양까지 확인할 수 있습니다.</li>
+        </ol>
+        <p class="g-note">메뉴 이름은 Claude 화면 언어·버전에 따라 다를 수 있습니다(위는 영어 화면 기준 —
+          <a href="https://support.claude.com/en/articles/12512180-using-skills-in-claude" target="_blank" rel="noopener">Claude 도움말</a>).
+          회사 계정은 관리자가 스킬 올리기를 막아 두었을 수 있습니다.</p>
+      </div>
+    </details>
+    <p class="skill-note">🔒 이 사이트는 파일을 어디로도 보내지 않지만 <b>스킬은 다릅니다.</b> Claude에 올린 양식과 문서는 Claude 서비스(Anthropic)로 전송됩니다 —
+      회사 문서를 올려도 되는지 먼저 확인하세요. 스킬에는 양식 파일이 들어 있지 않고, 한글 사용법 노트는
+      <a href="https://hantip.net" target="_blank" rel="noopener">hantip.net</a> '한글문서작성' 강좌를 다시 정리한 것입니다(노트마다 원문 링크).</p>
+  </section>
   </div>
 </main>
 

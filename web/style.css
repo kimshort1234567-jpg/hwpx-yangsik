@@ -183,6 +183,21 @@ main.layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items:
 .g-head.good { color: var(--ok); }
 .g-note { margin: 4px 0 0; color: var(--muted); }
 
+/* Claude 스킬 내려받기: 단계가 아니라 덧붙임이라 단계 카드보다 가볍게(점선 테두리, 그림자 없음) */
+.skill { border: 1px dashed var(--line); border-radius: var(--radius); background: var(--panel); padding: 18px 22px; margin-bottom: 18px; }
+.skill-head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; margin-bottom: 8px; }
+.skill-head h2 { font-size: 17px; margin: 0; }
+.skill-head .btn { display: inline-block; text-decoration: none; flex: none; }
+.skill-lead { margin: 0 0 4px; font-size: 15px; }
+.skill-note { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+.skill .guide ol { margin: 2px 0 10px; padding-left: 22px; }
+.skill code {
+  font-family: ui-monospace, Consolas, "D2Coding", monospace; font-size: 13px; padding: 0 5px; border-radius: 6px;
+  background: var(--panel); border: 1px solid var(--line); overflow-wrap: anywhere;
+}
+.skill a { color: var(--brand); }
+.skill-head a.btn { color: var(--brand); }
+
 /* 양식 진단표(양식을 올린 뒤): 항목마다 있음(✓)·없음(!)·없어도 됨(·) */
 .verdict { margin: 12px 0 8px; padding: 8px 12px; border-radius: 10px; font-size: 14px; font-weight: 600; }
 .verdict.ok { background: var(--ok-soft); color: var(--ok); }

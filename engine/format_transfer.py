@@ -4531,11 +4531,20 @@ def norm(s: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
+PDF_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def pdf_text(s: str) -> str:
+    """PDF에서 뽑은 글자의 제어 글자를 빈칸으로. 글꼴에 따라 빈칸이 U+0001 같은 제어 글자로 뽑힌다 —
+    그대로 두면 쪽 번호('Ⅶ - 1')를 못 읽어 본문 쪽을 하나도 못 찾고, 넘친 글자로 잘못 센다(2026-11-16 한글 2020 PDF)."""
+    return PDF_CTRL.sub(" ", s)
+
+
 def printed_number(page):
     h = page.rect.height
     for b in page.get_text("blocks"):
         if b[1] > h * 0.88:
-            m = FOOT.search(b[4])
+            m = FOOT.search(pdf_text(b[4]))
             if m:
                 return int(m.group(1))
     return None
@@ -4551,7 +4560,7 @@ def toc_printed(pdf: Path, entries) -> list:
     import bisect
     import pymupdf
     doc = pymupdf.open(str(pdf))
-    lines = [s for p in doc if printed_number(p) is None for s in (norm(x) for x in p.get_text().splitlines()) if s]
+    lines = [s for p in doc if printed_number(p) is None for s in (norm(x) for x in pdf_text(p.get_text()).splitlines()) if s]
     starts, flat = [], ""
     for s in lines:
         starts.append(len(flat))
@@ -4577,7 +4586,7 @@ def toc_printed(pdf: Path, entries) -> list:
 def toc_pages(pdf: Path, entries) -> list:
     import pymupdf
     doc = pymupdf.open(str(pdf))
-    body = [(i, printed_number(p), norm(p.get_text())) for i, p in enumerate(doc)]
+    body = [(i, printed_number(p), norm(pdf_text(p.get_text()))) for i, p in enumerate(doc)]
     body = [b for b in body if b[1] is not None]
 
     def first(needle, start):
@@ -4951,7 +4960,7 @@ def pdf_overflow(R: Run, out_pkg: Pkg, doc) -> list:
     if not pages:
         first = next((norm(own_text(p))[:10] for s in out_pkg.sections[front_count(R):] for p in s.findall(q("hp:p"))
                       if norm(own_text(p))), "")
-        start = next((i for i, p in enumerate(doc) if first and first in norm(p.get_text())), 0)
+        start = next((i for i, p in enumerate(doc) if first and first in norm(pdf_text(p.get_text()))), 0)
         pages = list(range(start, len(doc)))
     out = []
     for i in pages:
@@ -4961,7 +4970,7 @@ def pdf_overflow(R: Run, out_pkg: Pkg, doc) -> list:
         for b in p.get_text("dict")["blocks"]:
             for ln in b.get("lines", []):
                 for sp in ln["spans"]:
-                    t = norm(sp["text"])
+                    t = norm(pdf_text(sp["text"]))
                     if t and sp["bbox"][3] > lim and not OVER_IGNORE.fullmatch(t) and t not in hf:
                         hits.append(t)
         if hits:
@@ -5006,7 +5015,7 @@ def check_pdf(R: Run, n_chapters: int, out_pkg: Pkg = None):
     for p in doc:
         if printed_number(p) is None:
             continue
-        bs = [norm(b[4]) for b in p.get_text("blocks") if b[1] > p.rect.height * 0.075]
+        bs = [norm(pdf_text(b[4])) for b in p.get_text("blocks") if b[1] > p.rect.height * 0.075]
         shown += ["".join(bs[j:j + 3]) for j in range(len(bs))]  # 긴 제목은 두 줄로 나뉘어 글 묶음이 갈린다
     miss = [t for t in want_titles if not any(s.startswith(t) for s in shown)]
     rows.append((f"본문에 찍힌 장 제목 {len(want_titles) - len(miss)}/{len(want_titles)}개가 차례와 같음(자동 번호 포함)", not miss))

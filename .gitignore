@@ -8,3 +8,6 @@ tests/out/
 *.hwpx
 *.docx
 !tests/fixtures/**
+# 공개판(web/hwp-expert-public.zip)이 아닌 스킬 묶음은 넣지 않는다
+hwp-expert.zip
+hwp-expert/
