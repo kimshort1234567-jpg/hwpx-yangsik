@@ -676,6 +676,25 @@ def decisions_from(options: dict, st: dict, prof: dict) -> dict:
     return D
 
 
+def result_fonts(path, front: int, roles=None) -> list:
+    """결과 파일에 쓰인 글꼴(글자가 있는 곳만) — 화면이 '이 PC에 있는지'를 확인해 알려 준다(결과를 여는 PC에 있어야 같은 모양).
+    앞쪽 구역(표지·차례)은 '표지·차례', 본문 구역은 결과 역할(결과역할.json)대로 본문·제목·장 제목·표·그림·표·그림 제목."""
+    place_of = {"본문": "본문", "빈 줄": "본문", "장 제목": "장 제목", "문서 제목": "장 제목", "캡션 문단": "표·그림 제목",
+                "표 문단": "표·그림", "그림 문단": "표·그림", "개체 문단": "표·그림"}
+    try:
+        pk = ft.Pkg(path)
+        body = [p for sec in pk.sections[front:] for p in sec.findall(q("hp:p"))]
+        roles = roles if roles and len(roles) == len(body) else [{} for _ in body]
+        pairs = [x for sec in pk.sections[:front] for p in sec.findall(q("hp:p")) for x in ft.text_runs(p, "표지·차례")]
+        for p, o in zip(body, roles):
+            role = o.get("역할", "본문")
+            place = "제목" if role in ft.HEADING_ROLES else place_of.get(role, "표·그림 제목" if "캡션" in role else "본문")
+            pairs += ft.text_runs(p, place)
+        return ft.fonts_report([(pk.header, pairs)])
+    except Exception:  # noqa: BLE001 — 글꼴 목록을 못 만들어도 결과 파일은 준다
+        return []
+
+
 TYPED_DIFF = re.compile(r"^원고에 친 번호 '(.+?)'와 결과 자동 번호 '(.+?)'가 다름")
 KEPT_OBJ = re.compile(r"^(표|그림) '.*' — 양식에 (?:표|그림) 예시가 없어 원고 모양 그대로 둠")
 
@@ -746,11 +765,12 @@ def convert(work, options: dict) -> dict:
     warns = check_note + group_alerts(
         [re.sub(r"^⚠\s*(p\d+(>\S+)?\s+)?", "", x[2:].strip()) for x in log.splitlines() if x.startswith("- ⚠")])
     made = json.loads(R.f("결과구성.json").read_text(encoding="utf-8"))
+    fonts = result_fonts(R.out, made.get("앞구역", 0), json.loads(R.f("결과역할.json").read_text(encoding="utf-8")))
     ap = json.loads(R.f("승인변경.json").read_text(encoding="utf-8"))
     split = json.loads(R.f("표나눔.json").read_text(encoding="utf-8"))
     return {"파일": str(R.out), "이름": R.out.name, "검증 실패": fails, "구성": made, "알림": warns[:20],
             "바뀐 글자": sum(1 for a in ap if a.get("종류") != "빈칸"),
-            "지운 앞 빈칸": sum(1 for a in ap if a.get("종류") == "빈칸"), "표 나눔": split, "설정": D}
+            "지운 앞 빈칸": sum(1 for a in ap if a.get("종류") == "빈칸"), "표 나눔": split, "설정": D, "글꼴": fonts}
 
 
 def run_all(template, document, work, options) -> dict:

@@ -384,6 +384,97 @@ function setName(files, s) { // 저장소에 넣을 때 기본 이름: 파일 �
   return `${stem(body)} 외 ${files.length - 1}개`;
 }
 
+/* ---------------------------------------------------------------- 글꼴
+   한글 파일에는 글꼴 이름만 들어 있다 — 결과를 여는 PC에 그 글꼴이 설치되어 있어야 양식과 같은 모양으로 보인다.
+   설치 여부는 글꼴 전체 이름으로 찾는다(FontFace local()). 엣지 시험(2026-11-16): 설치된 글꼴·없는 글꼴 25개를 모두 바르게 가렸다
+   (글자 폭 비교만으로는 '○○체 Light'처럼 이름에 굵기가 붙은 글꼴을 놓쳐서, 굵기 낱말이 없는 이름에만 보조로 쓴다).
+   크롬 계열(엣지·크롬·웨일)이 아닌 브라우저는 사용자가 설치한 글꼴을 숨길 수 있어 확인하지 않는다. */
+const CHROMIUM = /Chrome\/\d+/.test(navigator.userAgent);
+const WEIGHT_WORD = /\s(thin|extralight|ultralight|light|regular|book|medium|semibold|demibold|bold|extrabold|ultrabold|heavy|black)$/i;
+const fontSeen = new Map();
+let fontSeq = 0;
+function canvasHas(name) {
+  const c = document.createElement("canvas").getContext("2d");
+  const sample = "가나다라마바사아자차 ABCabcWQ 0123";
+  return ["monospace", "serif", "sans-serif"].some((b) => {
+    c.font = `40px ${b}`;
+    const base = c.measureText(sample).width;
+    c.font = `40px ${JSON.stringify(name)}, ${b}`;
+    return Math.abs(c.measureText(sample).width - base) > 0.01;
+  });
+}
+async function fontInstalled(name) {
+  if (fontSeen.has(name)) return fontSeen.get(name);
+  let ok = false;
+  try { await new FontFace(`fontcheck${fontSeq++}`, `local(${JSON.stringify(name)})`).load(); ok = true; } catch (_) { ok = false; }
+  if (!ok && !WEIGHT_WORD.test(name)) { try { ok = canvasHas(name); } catch (_) { ok = false; } }
+  fontSeen.set(name, ok);
+  return ok;
+}
+const FONT_STATE = { ok: "✓ 이 PC에 있음", missing: "이 PC에 없음", builtin: "한글에 들어 있음", unknown: "확인 못 함", wait: "확인 중…" };
+/* fromTemplate: 완성 화면에서 양식에 쓰인 글꼴 이름들 — 그 밖의 글꼴은 '문서에서 온 글꼴'(원래 모양 그대로 둔 표·그림 등)로 표시 */
+function fontListHtml(fonts, fromTemplate) {
+  if (!fonts || !fonts.length) return "";
+  const ms = (f) => fromTemplate && !fromTemplate.has(f["이름"]);
+  return `<ul class="fonts">${fonts.map((f) => `<li class="wait" data-font="${esc(f["이름"])}" data-builtin="${f["한글 내장"] ? "1" : ""}" data-ms="${ms(f) ? "1" : ""}">
+      <span class="f-name" style="font-family:${esc(JSON.stringify(f["이름"]))}, inherit">${esc(f["이름"])}</span>
+      <span class="f-where">${esc((f["쓰는 곳"] || []).join(" · "))}${ms(f) ? " · 바꾼 문서에서 온 글꼴" : ""}</span>
+      <span class="f-state">${FONT_STATE.wait}</span></li>`).join("")}</ul>
+    <div class="font-sum" hidden></div>`;
+}
+/* box 안의 글꼴 목록마다 이 PC에 있는지 표시하고 요약을 쓴다. forResult: 완성 화면(받는 사람 PC 안내를 덧붙임) */
+async function markFonts(box, forResult) {
+  const items = [...box.querySelectorAll(".fonts li")];
+  if (!items.length) return;
+  const missing = [];
+  let unknown = 0, fromDoc = 0;
+  for (const li of items) {
+    const name = li.dataset.font;
+    let st;
+    if (!CHROMIUM) st = li.dataset.builtin ? "builtin" : "unknown";
+    else if (await fontInstalled(name)) st = "ok";
+    else st = li.dataset.builtin ? "builtin" : "missing";
+    li.className = st;
+    li.querySelector(".f-state").textContent = FONT_STATE[st];
+    if (st === "missing") { missing.push(name); fromDoc += li.dataset.ms ? 1 : 0; }
+    if (st === "unknown") unknown++;
+  }
+  const row = box.querySelector(".diag > li.font-row");
+  if (row) {
+    row.classList.toggle("no", missing.length > 0);
+    row.classList.toggle("ok", missing.length === 0);
+    row.querySelector(".d-mark").textContent = missing.length ? "!" : "✓";
+  }
+  const sum = box.querySelector(".font-sum");
+  const install = "설치: 글꼴 파일(.ttf·.otf)을 오른쪽 클릭 → [설치](여럿이 쓰는 PC면 [모든 사용자용으로 설치]) → 열려 있는 한글을 모두 닫았다가 다시 엽니다.";
+  const other = forResult ? " 이 파일을 다른 사람에게 보낼 때도 받는 사람 PC에 같은 글꼴이 있어야 합니다." : "";
+  if (missing.length) {
+    sum.className = "font-sum warn";
+    sum.innerHTML = `<p><b>이 PC에 없는 글꼴 ${missing.length}개: ${esc(missing.join(", "))}</b></p>
+      <p>${forResult ? "결과 파일은 이 글꼴 이름으로 만들어졌습니다." : "변환은 그대로 됩니다."}
+      다만 설치하지 않으면 한글에서 열 때 비슷한 다른 글꼴로 보이고, 줄·쪽 나눔이 양식과 달라질 수 있습니다.${esc(other)}
+      ${fromDoc ? "‘바꾼 문서에서 온 글꼴’은 양식에 없던 글꼴로, 문서에서 원래 모양 그대로 둔 표·그림 등에 쓰였습니다(문서를 만든 PC에서 쓰던 글꼴)." : ""}</p>
+      <p class="f-how">${esc(install)} <button type="button" class="linkbtn" data-recheck>다시 확인</button>
+      <small>(설치했는데도 '없음'이면 브라우저를 닫았다가 다시 열어 주세요)</small></p>`;
+  } else if (unknown) {
+    sum.className = "font-sum";
+    sum.innerHTML = `<p>이 브라우저에서는 글꼴이 설치되어 있는지 확인할 수 없습니다(엣지·크롬·웨일에서는 확인해 드립니다).
+      위 글꼴이 이 PC에 있어야 양식과 같은 모양으로 보입니다.${esc(other)}</p>`;
+  } else {
+    sum.className = "font-sum ok";
+    sum.innerHTML = `<p>✓ ${forResult ? "결과에 쓰인" : "양식에 쓰인"} 글꼴이 모두 이 PC에 있습니다(한글에 들어 있는 글꼴 포함).${esc(other)}</p>`;
+  }
+  sum.hidden = false;
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-recheck]");
+  if (!b) return;
+  fontSeen.clear();
+  const box = b.closest("#template-card, #done-card");
+  box.querySelectorAll(".fonts li").forEach((li) => { li.className = "wait"; li.querySelector(".f-state").textContent = FONT_STATE.wait; });
+  markFonts(box, box.id === "done-card");
+});
+
 /* ---------------------------------------------------------------- 1. 양식 */
 /* 양식 진단표: 엔진이 검사한 항목(있음·없음, 없을 때 어떻게 처리하는지, 한글에서 넣는 법)을 그대로 보여 준다 */
 function diagHtml(s) {
@@ -410,7 +501,11 @@ function diagHtml(s) {
   const verdict = lack.length
     ? `<p class="verdict warn">양식으로 쓸 수 있습니다. 다만 양식에 없는 ${lack.length}가지(${esc(lack.join(", "))})는 아래에 적은 대로 처리합니다.</p>`
     : `<p class="verdict ok">✓ 양식으로 쓸 수 있습니다. 필요한 모양을 모두 찾았습니다.</p>`;
-  return `${verdict}<ul class="diag">${d["항목"].map(row).join("")}</ul>`;
+  const fonts = s["글꼴"] || [];
+  const fontRow = fonts.length ? `<li class="font-row ok"><span class="d-mark" aria-hidden="true">✓</span>
+      <span class="d-name">글꼴</span><span class="d-text"><small class="f-intro">양식에 쓰인 글꼴 —
+      결과를 여는 PC에 설치되어 있어야 양식과 같은 모양으로 보입니다</small>${fontListHtml(fonts)}</span></li>` : "";
+  return `${verdict}<ul class="diag">${d["항목"].map(row).join("")}${fontRow}</ul>`;
 }
 
 function onTemplate(files, data, hash, saved, picks) {
@@ -447,6 +542,7 @@ function onTemplate(files, data, hash, saved, picks) {
   $("tmpl-change").addEventListener("click", resetTemplate);
   $("tmpl-add").addEventListener("click", () => { state.kind = "template-add"; openImport(); });
   $("tmpl-pick").addEventListener("click", openPick);
+  markFonts($("template-card"), false);
   lock("step2", false);
   resetDocument();
   syncVault();
@@ -1056,6 +1152,7 @@ function onResult(data, bytes) {
       <li>${ok ? "자동 검사: 문서 구조·글자 보존·서식 모두 통과" : checked ? `자동 검사에서 ${data["검증 실패"]}곳이 다릅니다 — 한글에서 열어 확인해 주세요` : "자동 검사를 끝내지 못했습니다 — 한글에서 열어 확인해 주세요"}</li>
       ${splitNote}${tocNote}${warn}
     </ul>
+    ${(data["글꼴"] || []).length ? `<div class="fontbox"><p class="f-title">결과에 쓰인 글꼴</p>${fontListHtml(data["글꼴"], new Set(((state.template && state.template.s["글꼴"]) || []).map((f) => f["이름"])))}</div>` : ""}
     <div class="row-actions">
       <button type="button" class="btn primary" id="again-dl">다시 다운로드</button>
       <button type="button" class="btn" id="again-survey">설정 바꿔서 다시 만들기</button>
@@ -1067,4 +1164,5 @@ function onResult(data, bytes) {
   $("again-dl").addEventListener("click", () => download(state.result.name, state.result.bytes));
   $("again-survey").addEventListener("click", openSurvey);
   $("next-doc").addEventListener("click", () => { resetDocument(); $("drop-document").scrollIntoView({ behavior: "smooth" }); });
+  markFonts($("done-card"), true);
 }

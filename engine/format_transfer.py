@@ -92,6 +92,7 @@ LISTS = {"borderFill": "borderFills", "charPr": "charProperties", "tabPr": "tabP
 FIRST_ID = {"borderFill": 1, "numbering": 1, "bullet": 1}  # 나머지 목록은 0부터
 LANG_ATTR = {"hangul": "HANGUL", "latin": "LATIN", "hanja": "HANJA", "japanese": "JAPANESE",
              "other": "OTHER", "symbol": "SYMBOL", "user": "USER"}
+LANG_ATTR_REV = {v: k for k, v in LANG_ATTR.items()}
 OBJ = ("tbl", "pic", "container", "rect", "ellipse", "line", "arc", "polygon", "curve", "connectLine",
        "equation", "ole", "textart", "chart")
 HEADING_ROLES = ("1수준", "2수준", "3수준", "4수준", "5수준")
@@ -340,6 +341,83 @@ def plain(ts) -> str:
 
 def own_text(p) -> str:
     return plain(text_ts(p))
+
+
+# ======================================================================= 글꼴(결과를 여는 PC에 있어야 하는 것)
+
+# 한글이 자체로 갖고 있어 Windows에 설치하지 않아도 한글에서 보이는 글꼴(한글 2020의 Shared\TTF에서 확인 — 2026-11-16).
+# 글꼴 종류가 HFT(한글 전용)인 것도 한글에 들어 있다. 웹 화면은 이 글꼴을 '한글에 들어 있음'으로 보여 준다.
+HANGUL_FONTS = frozenset(x.replace("|", " ") for x in """
+함초롬바탕 함초롬돋움 한컴바탕 한컴돋움 한컴바탕확장 한양해서 안상수2006굵은 안상수2006가는 안상수2006중간
+굵은안상수체 가는안상수체 중간안상수체 휴먼굵은팸체 휴먼굵은샘체 휴먼가는팸체 휴먼가는샘체 휴먼고딕 휴먼명조 휴먼옛체 휴먼중간팸체 휴먼중간샘체
+MD아롱체 MD아트체 MD이솝체 MD개성체 MD솔체 나눔손글씨|붓
+HY바다L HY바다M HY동녘B HY동녘M HY강B HY강M HY나무B HY나무L HY나무M HY산B HY수평선B HY수평선M HY태백B HY울릉도B HY울릉도M
+HY백송B HY크리스탈M HY그래픽 HY궁서 HY견고딕 HY견명조 HY목판L HY엽서M HY센스L
+양재벨라체M 양재블럭체 양재본목각체M 양재붓꽃체L 양재참숯체B 양재백두체B 양재둘기체M 양재다운명조M 양재깨비체B 양재꽃게체M 양재인장체M
+양재이니셜체 양재매화체S 양재난초체M 양재샤넬체M 양재소슬체S 양재튼튼체B 양재와당체M
+한컴|백제|B 한컴|백제|M 한컴|쿨재즈|B 한컴|쿨재즈|L 한컴|쿨재즈|M 한컴|바겐세일|B 한컴|바겐세일|M 한컴|솔잎|B 한컴|솔잎|M 한컴|소망|B 한컴|소망|M
+한컴|윤고딕|230 한컴|윤고딕|240 한컴|윤고딕|250 한컴|윤체|B 한컴|윤체|L 한컴|윤체|M 한컴|윤고딕|720 한컴|윤고딕|740 한컴|윤고딕|760
+""".split())  # '|'는 이름 안 빈칸
+
+
+def text_runs(p, place: str):
+    """문단 p에서 글자가 있는 run → (run, 쓰는 곳). 표 칸 → '표·그림', 캡션 → '표·그림 제목', 머리말·꼬리말 → '머리말·꼬리말'(그 안의 문단까지)."""
+    for run in p.findall(q("hp:run")):
+        if "".join("".join(t.itertext()) for t in run.findall(q("hp:t"))).strip():
+            yield run, place
+        for obj in run:
+            name = local(obj)
+            if name == "ctrl":
+                for c in obj:
+                    if local(c) in ("header", "footer", "footNote", "endNote"):
+                        where = "머리말·꼬리말" if local(c) in ("header", "footer") else "각주"
+                        for sp in c.find(q("hp:subList")).findall(q("hp:p")):
+                            yield from text_runs(sp, where)
+                continue
+            cap = obj.find(q("hp:caption"))
+            if cap is not None:
+                for sp in cap.find(q("hp:subList")).findall(q("hp:p")):
+                    yield from text_runs(sp, "표·그림 제목")
+            inner = place if place in ("표·그림", "머리말·꼬리말", "표지", "차례", "표지·차례") else "표·그림"
+            for sl in (obj.findall(f"{q('hp:tr')}/{q('hp:tc')}/{q('hp:subList')}") +
+                       obj.findall(f".//{q('hp:drawText')}/{q('hp:subList')}")):
+                for sp in sl.findall(q("hp:p")):
+                    yield from text_runs(sp, inner)
+
+
+FONT_LANG = {"HANGUL": re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏]"), "LATIN": re.compile(r"[A-Za-z0-9]"),
+             "HANJA": re.compile(r"[一-鿿豈-﫿]")}  # 그 언어 글꼴로 찍히는 글자
+PLACE_ORDER = ("본문", "제목", "장 제목", "표·그림", "표·그림 제목", "머리말·꼬리말", "각주", "표지", "차례", "표지·차례")
+
+
+def fonts_report(groups) -> list:
+    """글꼴 목록: groups = [(header, [(run, 쓰는 곳), ...]), ...](파일마다 header가 다를 수 있음).
+    run의 글자 모양이 가리키는 언어별 글꼴 가운데 그 언어 글자(한글·영문 숫자·한자)가 실제로 있는 것만 센다.
+    → [{"이름", "종류"(TTF·HFT …), "쓰는 곳": [...], "글자": 글자 수, "한글 내장": 한글에 들어 있는 글꼴인가}] 많이 쓰는 순서."""
+    stat = {}
+    for header, pairs in groups:
+        faces = {ff.get("lang"): {f.get("id"): (f.get("face"), f.get("type")) for f in ff.findall(q("hh:font"))}
+                 for ff in header.iter(q("hh:fontface"))}
+        refs = {}
+        for c in header.iter(q("hh:charPr")):
+            fr = c.find(q("hh:fontRef"))
+            if fr is not None:
+                refs[c.get("id")] = {lang: faces.get(lang, {}).get(fr.get(LANG_ATTR_REV[lang])) for lang in FONT_LANG}
+        for run, place in pairs:
+            text = "".join("".join(t.itertext()) for t in run.findall(q("hp:t")))
+            for lang, pat in FONT_LANG.items():
+                n = len(pat.findall(text))
+                face = (refs.get(run.get("charPrIDRef")) or {}).get(lang)
+                if not n or not face or not face[0]:
+                    continue
+                e = stat.setdefault(face[0], {"이름": face[0], "종류": face[1] or "", "쓰는 곳": set(), "글자": 0})
+                e["쓰는 곳"].add(place)
+                e["글자"] += n
+    out = sorted(stat.values(), key=lambda e: -e["글자"])
+    for e in out:
+        e["쓰는 곳"] = sorted(e["쓰는 곳"], key=lambda x: PLACE_ORDER.index(x) if x in PLACE_ORDER else 99)
+        e["한글 내장"] = e["종류"].upper() == "HFT" or e["이름"] in HANGUL_FONTS
+    return out
 
 
 CAP_AUTONUM = ("PICTURE", "TABLE", "EQUATION")

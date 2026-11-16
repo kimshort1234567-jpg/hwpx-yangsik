@@ -563,7 +563,7 @@ def scan(path) -> dict:
         parts["본문"], part_rows["본문"] = part_of(groups[body_from:])
     if first_toc is not None and cover_i is None and first_toc > 0:
         notes.append(f"차례 앞 {first_toc}쪽은 표지로 보지 않음(제출문·요약 등)")
-    return {"path": path, "desc": desc, "parts": parts, "rows": part_rows, "notes": notes}
+    return {"path": path, "desc": desc, "header": pk.header, "parts": parts, "rows": part_rows, "notes": notes}
 
 
 def body_score(sc) -> tuple:
@@ -582,6 +582,40 @@ def tg_score(sc) -> int:
     if T.get("장 제목"):
         s += 2 if cls[int(T["장 제목"][1:])]["역할"] == "장 제목" else 1
     return s
+
+
+TOC_PLACE = {"장 제목": "장 제목", "표": "표·그림", "그림": "표·그림", "표 캡션": "표·그림 제목", "그림 캡션": "표·그림 제목",
+             "표 계속": "표·그림 제목", "그림 계속": "표·그림 제목"}
+
+
+def template_fonts(B, TG, cover, toc, R, T) -> list:
+    """결과에 들어갈 양식 글꼴: 역할마다 결과가 복사해 쓰는 예시 문단(본문·제목·장 제목·표·그림·제목 문단), 머리말·꼬리말,
+    양식 표지·차례 부분 전체. 결과를 여는 PC에 이 글꼴이 있어야 양식과 같은 모양으로 보인다(없으면 한글이 다른 글꼴로 바꿔 보여 줌)."""
+    def para(sc, ref):
+        m = re.fullmatch(r"p(\d+)", str(ref or ""))
+        rows = sc["rows"].get("본문") or []
+        return rows[int(m.group(1))]["p"] if m and int(m.group(1)) < len(rows) else None
+    groups = {}
+
+    def add(sc, pairs):
+        groups.setdefault(id(sc), (sc["header"], []))[1].extend(pairs)
+    for key, ref in R.items():
+        place = "본문" if key == "본문" else "제목" if key.endswith("수준") else None
+        p = para(B, ref) if place else None
+        if p is not None:
+            add(B, ft.text_runs(p, place))
+    for key, ref in T.items():
+        p = para(TG, ref)
+        if p is None:
+            continue
+        if key in ("머리말꼬리말", "쪽번호"):
+            add(TG, [x for x in ft.text_runs(p, "본문") if x[1] == "머리말·꼬리말"])
+        elif key in TOC_PLACE:
+            add(TG, ft.text_runs(p, TOC_PLACE[key]))
+    for sc, part in ((cover, "표지"), (toc, "차례")):
+        if sc is not None:
+            add(sc, [x for r in sc["rows"][part] for x in ft.text_runs(r["p"], part)])
+    return ft.fonts_report(list(groups.values()))
 
 
 def diagnose(s: dict) -> dict:
@@ -694,6 +728,8 @@ def analyze(path, profile_path=None, picks=None) -> dict:
     prof["요약"] = describe(B["desc"], B["rows"]["본문"], cls, R, T, cover_lines, toc_R, parts,
                           tg=(TG["desc"], TG["rows"]["본문"], TG["cls"]) if ti != bi else None, N=B["N"])
     prof["요약"]["후보"] = B["cands"]
+    prof["요약"]["글꼴"] = template_fonts(B, TG, scans[ci] if ci is not None else None, scans[oi] if oi is not None else None,
+                                       R, T)
     prof["요약"]["진단"] = diagnose(prof["요약"])
     if len(paths) > 1:
         unused = [names[i] for i in range(len(paths)) if i not in used]

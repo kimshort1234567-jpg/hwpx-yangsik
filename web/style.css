@@ -211,6 +211,31 @@ main.layout { display: grid; grid-template-columns: minmax(0, 1fr); align-items:
   .diag > li .d-text { grid-column: 2; }
 }
 
+/* 글꼴 목록(양식 진단표·완성 화면): 글꼴마다 이 PC에 있는지 */
+.f-intro { display: block; margin: 0 0 4px; color: var(--muted); }
+.fonts { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.fonts li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.f-name { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
+.f-where { font-size: 12px; color: var(--muted); }
+.f-state { font-size: 12px; font-weight: 600; padding: 0 8px; border-radius: 999px; background: var(--bg); color: var(--muted); }
+.fonts li.ok .f-state { background: var(--ok-soft); color: var(--ok); }
+.fonts li.missing .f-state { background: var(--err-soft); color: var(--err); }
+.fonts li.missing .f-name { color: var(--err); }
+.fonts li.builtin .f-state { background: var(--brand-soft); color: var(--brand); }
+.diag > li.font-row.ok { background: none; }
+.diag > li.font-row.no .d-mark { color: var(--err); }
+.font-sum { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--bg); font-size: 13px; color: var(--ink); }
+.font-sum[hidden] { display: none; }
+.font-sum p { margin: 0 0 4px; }
+.font-sum p:last-child { margin-bottom: 0; }
+.font-sum.ok { background: var(--ok-soft); color: var(--ok); }
+.font-sum.warn { background: var(--err-soft); }
+.font-sum.warn b { color: var(--err); }
+.font-sum small { display: block; color: var(--muted); }
+.f-how { color: var(--muted); }
+.fontbox { margin: 12px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.f-title { margin: 0 0 6px; font-weight: 700; font-size: 14px; }
+
 /* 제목·본문 줄 고치기 창 */
 .sheet.wide { width: min(680px, 100%); }
 .pick-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
