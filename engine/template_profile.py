@@ -505,7 +505,8 @@ def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None, N=
         ref = T.get(kind)
         if ref:
             cap = t_cls[int(ref[1:])].get("캡션") or {}
-            caps[kind] = {"캡션": (cap.get("번호", "") + " " + (cap.get("글자") or "")).strip(), "위치": cap.get("위치") or "없음"}
+            caps[kind] = {"캡션": (cap.get("번호", "") + " " + (caption_shown(t_rows[int(ref[1:])]["p"]) or cap.get("글자") or "")).strip(),
+                          "위치": SIDE_KO.get(cap.get("위치"), cap.get("위치")) or "없음"}
             if T.get(f"{kind} 캡션"):  # 제목을 개체 위·아래에 따로 문단으로 두는 양식
                 sr = t_rows[int(T[f"{kind} 캡션"][1:])]
                 shown = ft.number_all(t_desc, sr["sec"]).get(f"p{sr['i']}") or (t_cls[int(T[f"{kind} 캡션"][1:])].get("번호") or "")
@@ -536,6 +537,29 @@ def describe(desc: Desc, rows, cls, R, T, cover_lines, toc_R, parts, tg=None, N=
             "본문": para(R.get("본문")),
             "표": caps.get("표"), "그림": caps.get("그림"), **hf, "쪽 번호": pn,
             "차례 항목": sorted(k for k in toc_R if k not in ("머리", "제목 뒤 빈 줄")), "없는 것": missing}
+
+
+SIDE_KO = {"TOP": "위", "BOTTOM": "아래", "LEFT": "왼쪽", "RIGHT": "오른쪽"}  # 개체에 붙은 캡션의 자리(화면에 보일 말)
+
+
+def caption_shown(p) -> str:
+    """예시 개체에 붙은 캡션을 화면에 보일 글자로 — 자동 번호 자리는 '1'로 적는다(글자만 읽으면 번호가 빠져 '표  제목'이 된다)."""
+    cap = next(p.iter(q("hp:caption")), None)
+    if cap is None or cap.find(q("hp:subList")) is None:
+        return ""
+    out = []
+    for cp in cap.find(q("hp:subList")).findall(q("hp:p")):
+        buf = []
+        for r in cp.findall(q("hp:run")):
+            for c in r:
+                if ft.autonum_ctrl(c):
+                    buf.append("1")
+                elif ft.local(c) == "t":
+                    buf.append("".join(c.itertext()))
+        line = " ".join("".join(buf).split())
+        if line:
+            out.append(line)
+    return " / ".join(out)[:60]
 
 
 def scan(path) -> dict:

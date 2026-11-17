@@ -8,6 +8,9 @@ tests/out/
 *.hwpx
 *.docx
 !tests/fixtures/**
+# 사이트에서 내려받게 하는 견본(회사 자료 없이 새로 만든 파일)만 예외
+!web/samples/*.hwpx
+!web/samples/*.docx
 # 공개판(web/hwp-expert-public.zip)이 아닌 스킬 묶음은 넣지 않는다
 hwp-expert.zip
 hwp-expert/
