@@ -420,6 +420,27 @@ def fonts_report(groups) -> list:
     return out
 
 
+# 글자 모양(hh:charPr) 자식 요소의 순서(OWPML). 한글 2020은 기본값인 요소(밑줄 없음 등)를 아예 쓰지 않고,
+# 한글 2024는 underline·strikeout·outline·shadow를 늘 쓴다 — 있다고 가정하지도, 끝에 덧붙이지도 않는다(char_child).
+CHAR_ORDER = ("fontRef", "ratio", "spacing", "relSz", "offset", "italic", "bold", "underline", "strikeout", "outline",
+              "shadow", "emboss", "engrave", "supscript", "subscript")
+
+
+def char_child(n, tag: str):
+    """글자 모양 n의 자식 요소 tag(예: 'bold', 'underline') — 없으면 CHAR_ORDER 순서에 맞는 자리에 만들어 돌려준다."""
+    e = n.find(q("hh:" + tag))
+    if e is not None:
+        return e
+    rank = CHAR_ORDER.index(tag)
+    at = 0
+    for i, c in enumerate(n):
+        if local(c) in CHAR_ORDER and CHAR_ORDER.index(local(c)) < rank:
+            at = i + 1
+    e = etree.Element(q("hh:" + tag))
+    n.insert(at, e)
+    return e
+
+
 CAP_AUTONUM = ("PICTURE", "TABLE", "EQUATION")
 LABEL_TAIL = re.compile(r"^[>\])}〉》】.:\-–·]*\s*")
 
@@ -1699,7 +1720,7 @@ def bold_body_para(ctx: Ctx, ex: dict, segs):
     def cfn(n):
         if n.find(q("hh:bold")) is not None:
             return False
-        etree.SubElement(n, q("hh:bold"))
+        char_child(n, "bold")
     np = copy.deepcopy(e)
     np.set("paraPrIDRef", ctx.dst.variant("paraPr", e.get("paraPrIDRef"), pfn))
     return ctx.set_seg_runs(np, ctx.dst.variant("charPr", ctx.tcolor(text_run_cid(e)), cfn), segs)
@@ -3836,8 +3857,8 @@ def simple_para(ctx: Ctx, ex, text: str, size=None, bold=False, center=False, le
     def cfn(n):
         if size:
             n.set("height", str(int(size * 100)))
-        if bold and n.find(q("hh:bold")) is None:
-            etree.SubElement(n, q("hh:bold"))
+        if bold:
+            char_child(n, "bold")
     cid = ctx.dst.variant("charPr", ctx.tcolor(ctx.tg.char_pr(text_run_cid(ex))), cfn)
     p = etree.Element(q("hp:p"))
     for k, v in (("id", "0"), ("paraPrIDRef", pid), ("styleIDRef", ctx.tg.style(ex.get("styleIDRef"))), ("pageBreak", "0"),

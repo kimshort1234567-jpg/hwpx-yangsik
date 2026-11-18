@@ -342,13 +342,14 @@ class Hwpx:
             def fn(n):
                 if not (f["b"] or f["i"] or f["u"] or (f["color"] and f["color"] != n.get("textColor"))):
                     return False
-                at = list(n).index(n.find(q("hh:offset"))) + 1
-                for tag, want in (("italic", f["i"]), ("bold", f["b"])):  # 순서: offset, italic, bold, underline
-                    if want and n.find(q("hh:" + tag)) is None:
-                        n.insert(at, etree.Element(q("hh:" + tag)))
-                        at += 1
-                if f["u"]:
-                    n.find(q("hh:underline")).set("type", "BOTTOM")
+                for tag, want in (("italic", f["i"]), ("bold", f["b"])):  # 순서는 ft.char_child가 맞춘다
+                    if want:
+                        ft.char_child(n, tag)
+                if f["u"]:  # 한글 2020이 저장한 양식은 밑줄 없는 글자 모양에 underline 요소가 아예 없다
+                    ul = ft.char_child(n, "underline")
+                    ul.set("type", "BOTTOM")
+                    ul.set("shape", ul.get("shape") or "SOLID")
+                    ul.set("color", ul.get("color") or "#000000")
                 if f["color"]:
                     n.set("textColor", f["color"])
             self.cp_memo[key] = self.dst.variant("charPr", self.cp0, fn)
